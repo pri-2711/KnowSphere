@@ -1,0 +1,33 @@
+PDF Extraction Report
+====================
+Generated: 2026-10-17T10:52:53.550682+00:00
+Input: D:\internship\knowledgeMap\data\raw_pdfs
+PDF files found: 2
+
+book1.pdf — (title unavailable)
+  Pages: 368; processed: 368; methods: empty=7, low_text=2, text=359
+  Text file: book1.txt
+  Page 2 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 2 WARNING: OCR found no text; page may be intentionally blank.
+  Page 6 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 6 WARNING: OCR found no text; page may be intentionally blank.
+  Page 8 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 8 WARNING: OCR found no text; page may be intentionally blank.
+  Page 12 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 12 WARNING: OCR found no text; page may be intentionally blank.
+  Page 23 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 23 WARNING: OCR returned very little usable text.
+  Page 24 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 24 WARNING: OCR found no text; page may be intentionally blank.
+  Page 243 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 243 WARNING: OCR returned very little usable text.
+  Page 244 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 244 WARNING: OCR found no text; page may be intentionally blank.
+  Page 367 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 367 WARNING: OCR found no text; page may be intentionally blank.
+
+book2.pdf — Intro
+  Pages: 222; processed: 222; methods: low_text=1, text=221
+  Text file: book2.txt
+  Page 6 WARNING: Little or no usable embedded text; potential scanned page.
+  Page 6 WARNING: OCR returned very little usable text.
