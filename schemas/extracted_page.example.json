@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0.0",
+  "document_id": "book2",
+  "filename": "book2.pdf",
+  "page_number": 65,
+  "printed_page_number": "61",
+  "extracted_text": "Chapter 6                                                                                  Design Synthesis\n\n            SUPPLEMENT 6-A\n     CONCEPT DESCRIPTION\n            SHEET\n\n\nThe Concept Description Sheet describes (in tex-   be integrated to meet the performance and func-\ntual or graphical form) the technical approach or    tional requirements. It is generally used in early\nthe design concept, and shows how the system will    concept design to show system concepts.\n\n\n\n\n                                                                                        Target\n                 Missile\n\n\n\n\n                                                       Missile\n                                                   Tracking                             Target      Steering\n                                               Radar                            Tracking   Commands\n                                                                              Radar\n\n\n\n\n\n             Radio\n\n\n\n\n        Computer\n\n\n                            External Command Guidance System\n\n                  Figure 6-3. Concept Description Sheet Example\n\n\n\n\n\n                                        61",
+  "pymupdf_text": "Chapter 6                                                                                  Design Synthesis\n\n            SUPPLEMENT 6-A\n     CONCEPT DESCRIPTION\n            SHEET\n\n\nThe Concept Description Sheet describes (in tex-   be integrated to meet the performance and func-\ntual or graphical form) the technical approach or    tional requirements. It is generally used in early\nthe design concept, and shows how the system will    concept design to show system concepts.\n\n\n\n\n                                                                                        Target\n                 Missile\n\n\n\n\n                                                       Missile\n                                                   Tracking                             Target      Steering\n                                               Radar                            Tracking   Commands\n                                                                              Radar\n\n\n\n\n\n             Radio\n\n\n\n\n        Computer\n\n\n                            External Command Guidance System\n\n                  Figure 6-3. Concept Description Sheet Example\n\n\n\n\n\n                                        61",
+  "content_type": "mixed",
+  "extraction_method": "pymupdf",
+  "quality_status": "review",
+  "warnings": [
+    "Page also contains a labeled system diagram; text extraction does not capture its visual relationships."
+  ],
+  "errors": [],
+  "associated_assets": [
+    {
+      "asset_id": "book2-page-65-source",
+      "kind": "source_page",
+      "uri": "../raw_pdfs/book2.pdf#page=65",
+      "document_id": "book2",
+      "page_number": 65,
+      "caption": "Source page containing Figure 6-3, Concept Description Sheet Example."
+    }
+  ],
+  "interpretations": []
+}

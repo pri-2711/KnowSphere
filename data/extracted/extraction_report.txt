@@ -1,33 +1,23 @@
 PDF Extraction Report
 ====================
-Generated: 2026-10-17T10:52:53.550682+00:00
+Generated: 2026-10-21T06:07:31.979972+00:00
 Input: D:\internship\knowledgeMap\data\raw_pdfs
 PDF files found: 2
 
 book1.pdf — (title unavailable)
-  Pages: 368; processed: 368; methods: empty=7, low_text=2, text=359
+  Pages: 368; processed: 368; methods: empty=7, text=361
   Text file: book1.txt
-  Page 2 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 2 WARNING: OCR found no text; page may be intentionally blank.
-  Page 6 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 6 WARNING: OCR found no text; page may be intentionally blank.
-  Page 8 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 8 WARNING: OCR found no text; page may be intentionally blank.
-  Page 12 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 12 WARNING: OCR found no text; page may be intentionally blank.
-  Page 23 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 23 WARNING: OCR returned very little usable text.
-  Page 24 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 24 WARNING: OCR found no text; page may be intentionally blank.
-  Page 243 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 243 WARNING: OCR returned very little usable text.
-  Page 244 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 244 WARNING: OCR found no text; page may be intentionally blank.
-  Page 367 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 367 WARNING: OCR found no text; page may be intentionally blank.
+  Page 2 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
+  Page 6 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
+  Page 8 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
+  Page 12 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
+  Page 23 WARNING: Sparse embedded text retained without OCR because no raster image was found.
+  Page 24 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
+  Page 243 WARNING: Sparse embedded text retained without OCR because no raster image was found.
+  Page 244 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
+  Page 367 WARNING: No embedded text or raster image found; blankness is unverified and vector-only content may require visual review.
 
 book2.pdf — Intro
-  Pages: 222; processed: 222; methods: low_text=1, text=221
+  Pages: 222; processed: 222; methods: text=222
   Text file: book2.txt
-  Page 6 WARNING: Little or no usable embedded text; potential scanned page.
-  Page 6 WARNING: OCR returned very little usable text.
+  Page 6 WARNING: Sparse embedded text retained without OCR because no raster image was found.

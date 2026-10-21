@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/knowledge-map/extracted-page.schema.json",
+  "title": "Knowledge Map extracted PDF page",
+  "description": "One source PDF page. Extracted text is immutable source output; generated interpretations are separate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_id",
+    "filename",
+    "page_number",
+    "extracted_text",
+    "content_type",
+    "extraction_method",
+    "quality_status",
+    "warnings",
+    "errors",
+    "associated_assets",
+    "interpretations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "document_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier shared by every page in the source document."
+    },
+    "filename": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Original source PDF filename."
+    },
+    "page_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "One-based PDF page index; distinct from any printed page number."
+    },
+    "printed_page_number": {
+      "type": ["string", "null"],
+      "description": "Printed page label if reliably identified; otherwise null."
+    },
+    "extracted_text": {
+      "type": "string",
+      "description": "Uncorrected text selected by the extraction workflow (PyMuPDF or Tesseract). Never replace with a model correction."
+    },
+    "pymupdf_text": {
+      "type": ["string", "null"],
+      "description": "Original PyMuPDF text-layer result before OCR fallback, when available."
+    },
+    "content_type": {
+      "type": "string",
+      "enum": ["normal_text", "scanned_page", "table", "diagram", "image", "mixed", "unknown"],
+      "description": "Page-level content category. Use unknown rather than guessing from text length alone."
+    },
+    "extraction_method": {
+      "type": "string",
+      "enum": ["pymupdf", "tesseract", "vision_model", "none"],
+      "description": "Method that produced extracted_text. Vision-generated descriptions belong in interpretations, not extracted_text."
+    },
+    "quality_status": {
+      "type": "string",
+      "enum": ["usable", "review", "no_text_detected", "failed"],
+      "description": "no_text_detected means only that no usable text was obtained; it does not assert a visually blank page."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "errors": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "associated_assets": {
+      "type": "array",
+      "description": "Optional source-page, image, table, or figure references. Keep source document/page provenance with each reference.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_id", "kind", "uri", "document_id", "page_number"],
+        "properties": {
+          "asset_id": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "enum": ["source_page", "image", "figure", "table"]},
+          "uri": {"type": "string", "minLength": 1},
+          "document_id": {"type": "string", "minLength": 1},
+          "page_number": {"type": "integer", "minimum": 1},
+          "caption": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "interpretations": {
+      "type": "array",
+      "description": "Optional derived human or model output. Never overwrite extracted_text or pymupdf_text.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text", "method", "source", "verified"],
+        "properties": {
+          "text": {"type": "string"},
+          "method": {"type": "string", "enum": ["human", "vision_model", "other"]},
+          "model": {"type": ["string", "null"]},
+          "source": {"type": "string", "minLength": 1},
+          "verified": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

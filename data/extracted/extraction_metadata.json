@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-10-17T10:52:53.550682+00:00",
+  "generated_at_utc": "2026-10-21T06:07:31.979972+00:00",
   "input_directory": "D:\\internship\\knowledgeMap\\data\\raw_pdfs",
   "output_directory": "D:\\internship\\knowledgeMap\\data\\extracted",
   "books": [
@@ -21,8 +21,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -52,8 +51,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -69,8 +67,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -100,8 +97,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -177,11 +173,10 @@
         },
         {
           "page": 23,
-          "method": "low_text",
+          "method": "text",
           "character_count": 36,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR returned very little usable text."
+            "Sparse embedded text retained without OCR because no raster image was found."
           ],
           "errors": []
         },
@@ -190,8 +185,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -1723,11 +1717,10 @@
         },
         {
           "page": 243,
-          "method": "low_text",
+          "method": "text",
           "character_count": 40,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR returned very little usable text."
+            "Sparse embedded text retained without OCR because no raster image was found."
           ],
           "errors": []
         },
@@ -1736,8 +1729,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -2600,8 +2592,7 @@
           "method": "empty",
           "character_count": 0,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR found no text; page may be intentionally blank."
+            "No embedded text or raster image found; blankness is unverified and vector-only content may require visual review."
           ],
           "errors": []
         },
@@ -2660,11 +2651,10 @@
         },
         {
           "page": 6,
-          "method": "low_text",
-          "character_count": 42,
+          "method": "text",
+          "character_count": 158,
           "warnings": [
-            "Little or no usable embedded text; potential scanned page.",
-            "OCR returned very little usable text."
+            "Sparse embedded text retained without OCR because no raster image was found."
           ],
           "errors": []
         },

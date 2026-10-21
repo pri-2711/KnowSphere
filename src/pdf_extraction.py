@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 try:
     import fitz  # PyMuPDF
@@ -63,6 +64,16 @@ def _ocr_page(page: Any, dpi: int, language: str) -> str:
     return pytesseract.image_to_string(image, lang=language).strip()
 
 
+def _source_page_uri(pdf_path: Path, output_dir: Path, page_number: int) -> str:
+    """Return a link from the JSONL sidecar to its source PDF page."""
+    try:
+        relative = os.path.relpath(pdf_path.resolve(), start=output_dir.resolve()).replace("\\", "/")
+        path = quote(relative, safe="/:@")
+    except ValueError:  # Different Windows drives cannot be expressed as a relative path.
+        path = quote(pdf_path.resolve().as_uri(), safe=":/@")
+    return f"{path}#page={page_number}"
+
+
 def _extract_pdf(pdf_path: Path, output_dir: Path, minimum: int, dpi: int,
                  language: str, tesseract_command: str | None) -> dict[str, Any]:
     record: dict[str, Any] = {
@@ -76,6 +87,7 @@ def _extract_pdf(pdf_path: Path, output_dir: Path, minimum: int, dpi: int,
         "text_file": None,
     }
     target = output_dir / f"{pdf_path.stem}.txt"
+    structured_target = output_dir / f"{pdf_path.stem}.pages.jsonl"
     if fitz is None:
         record["errors"].append("PyMuPDF (fitz) is unavailable; cannot open PDF.")
         return record
@@ -94,8 +106,13 @@ def _extract_pdf(pdf_path: Path, output_dir: Path, minimum: int, dpi: int,
             pytesseract.pytesseract.tesseract_cmd = ocr_executable
         needs_ocr = False
         sections: list[str] = []
+        structured_pages: list[dict[str, Any]] = []
         for index in range(len(doc)):
             page_number = index + 1
+            pymupdf_text: str | None = None
+            text = ""
+            extraction_method = "none"
+            quality_status = "failed"
             page_record: dict[str, Any] = {
                 "page": page_number,
                 "method": None,
@@ -105,34 +122,66 @@ def _extract_pdf(pdf_path: Path, output_dir: Path, minimum: int, dpi: int,
             }
             try:
                 page = doc.load_page(index)
-                text = _page_text(page)
-                if _has_usable_text(text, minimum):
+                pymupdf_text = _page_text(page)
+                text = pymupdf_text
+                has_raster_content = bool(page.get_images(full=True))
+                if _has_usable_text(pymupdf_text, minimum):
                     method = "text"
+                    extraction_method = "pymupdf"
+                    quality_status = "usable"
                 else:
-                    needs_ocr = True
-                    page_record["warnings"].append("Little or no usable embedded text; potential scanned page.")
-                    if not ocr_ready:
-                        method = "unavailable"
-                        page_record["errors"].append(
-                            "OCR unavailable. Install the Tesseract executable and Python packages, "
-                            "put tesseract on PATH, set TESSERACT_CMD, or pass --tesseract-cmd."
+                    if has_raster_content:
+                        needs_ocr = True
+                        page_record["warnings"].append(
+                            "Little or no usable embedded text on a page containing raster content; OCR attempted."
                         )
-                        text = ""
+                        if not ocr_ready:
+                            method = "unavailable"
+                            quality_status = "failed"
+                            extraction_method = "pymupdf" if pymupdf_text else "none"
+                            page_record["errors"].append(
+                                "OCR unavailable. Install the Tesseract executable and Python packages, "
+                                "put tesseract on PATH, set TESSERACT_CMD, or pass --tesseract-cmd."
+                            )
+                        else:
+                            try:
+                                text = _ocr_page(page, dpi, language)
+                                extraction_method = "tesseract"
+                                if _has_usable_text(text, minimum):
+                                    method = "ocr"
+                                    quality_status = "usable"
+                                elif text.strip():
+                                    method = "low_text"
+                                    quality_status = "review"
+                                    page_record["warnings"].append("OCR returned very little usable text.")
+                                else:
+                                    method = "empty"
+                                    quality_status = "no_text_detected"
+                                    page_record["warnings"].append(
+                                        "OCR found no text; the page may be blank or may contain non-text visual content."
+                                    )
+                            except Exception as exc:
+                                # Keep any embedded text even when OCR fails.
+                                text = pymupdf_text
+                                method = "failed"
+                                quality_status = "failed"
+                                extraction_method = "pymupdf" if pymupdf_text else "none"
+                                page_record["errors"].append(f"OCR failed: {type(exc).__name__}: {exc}")
                     else:
-                        try:
-                            text = _ocr_page(page, dpi, language)
-                            if _has_usable_text(text, minimum):
-                                method = "ocr"
-                            elif text.strip():
-                                method = "low_text"
-                                page_record["warnings"].append("OCR returned very little usable text.")
-                            else:
-                                method = "empty"
-                                page_record["warnings"].append("OCR found no text; page may be intentionally blank.")
-                        except Exception as exc:
-                            method = "failed"
-                            text = ""
-                            page_record["errors"].append(f"OCR failed: {type(exc).__name__}: {exc}")
+                        extraction_method = "pymupdf" if pymupdf_text else "none"
+                        if pymupdf_text:
+                            method = "text"
+                            quality_status = "review"
+                            page_record["warnings"].append(
+                                "Sparse embedded text retained without OCR because no raster image was found."
+                            )
+                        else:
+                            method = "empty"
+                            quality_status = "no_text_detected"
+                            page_record["warnings"].append(
+                                "No embedded text or raster image found; blankness is unverified and vector-only "
+                                "content may require visual review."
+                            )
                 page_record["method"] = method
                 page_record["character_count"] = len(text)
                 sections.append(f"{'=' * 24} PAGE {page_number} {'=' * 24}\n{text}\n")
@@ -140,6 +189,27 @@ def _extract_pdf(pdf_path: Path, output_dir: Path, minimum: int, dpi: int,
                 page_record["method"] = "failed"
                 page_record["errors"].append(f"Page extraction failed: {type(exc).__name__}: {exc}")
                 sections.append(f"{'=' * 24} PAGE {page_number} {'=' * 24}\n[Page extraction failed]\n")
+            structured_pages.append({
+                "schema_version": "1.0.0",
+                "document_id": pdf_path.stem,
+                "filename": pdf_path.name,
+                "page_number": page_number,
+                "extracted_text": text,
+                "pymupdf_text": pymupdf_text,
+                "content_type": "unknown",
+                "extraction_method": extraction_method,
+                "quality_status": quality_status,
+                "warnings": list(page_record["warnings"]),
+                "errors": list(page_record["errors"]),
+                "associated_assets": [{
+                    "asset_id": f"{pdf_path.stem}-page-{page_number}-source",
+                    "kind": "source_page",
+                    "uri": _source_page_uri(pdf_path, output_dir, page_number),
+                    "document_id": pdf_path.stem,
+                    "page_number": page_number,
+                }],
+                "interpretations": [],
+            })
             record["pages"].append(page_record)
         record["pages_processed"] = len(record["pages"])
         if needs_ocr and not ocr_ready:
@@ -151,6 +221,10 @@ def _extract_pdf(pdf_path: Path, output_dir: Path, minimum: int, dpi: int,
         target.write_text(
             f"Source PDF: {pdf_path.name}\nTitle: {record['title'] or '(not provided)'}\n"
             f"Pages: {record['total_pages']}\n\n" + "\n".join(sections),
+            encoding="utf-8",
+        )
+        structured_target.write_text(
+            "".join(json.dumps(page_record, ensure_ascii=False) + "\n" for page_record in structured_pages),
             encoding="utf-8",
         )
         record["text_file"] = target.name
@@ -229,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{book['filename']}: {book['pages_processed']}/{book['total_pages'] or 0} pages; "
               + (", ".join(f"{key}={value}" for key, value in sorted(methods.items())) or "no pages processed"))
     print(f"Output: {args.output.resolve()}")
-    print("Files: one .txt per PDF, extraction_metadata.json, extraction_report.txt")
+    print("Files: one .txt and one .pages.jsonl per PDF, extraction_metadata.json, extraction_report.txt")
     return 0
 
 
