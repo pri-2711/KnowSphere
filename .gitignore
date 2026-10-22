@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated Obsidian vault
+output/
+
+# Virtual environment and generated data
+.venv/
+.pytest_cache/
+data/images/
+data/uploads/

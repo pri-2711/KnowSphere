@@ -100,6 +100,7 @@ class MongoKnowledgeStore:
 
         self.semantic_groups.create_index([("concept_ids", ASCENDING)], name="ix_group_concepts")
         self.concepts.create_index([("canonical_name", ASCENDING)], name="ix_concept_name")
+        self.concepts.create_index([("mentions.content_unit_id", ASCENDING)], name="ix_concept_mention_unit")
         self.relationship_evidence.create_index(
             [("source_concept_id", ASCENDING), ("target_concept_id", ASCENDING),
              ("relation_type", ASCENDING)],

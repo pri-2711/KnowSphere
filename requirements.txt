@@ -1,0 +1,36 @@
+# Knowledge Map: all runtime and test dependencies, pinned.
+# Install inside the project virtual environment (.venv), see README.md.
+
+# PDF text, images, OCR fallback
+pymupdf==2.0
+pytesseract==0.3.13
+pillow==12.3.0
+
+# Storage
+pymongo==4.19.0
+
+# Concept extraction (GLiNER pulls in torch and transformers)
+gliner==0.2.29
+torch==2.14.1
+transformers==5.16.1
+
+# Concept merging (ONNX embeddings) and fuzzy matching
+fastembed==0.9.0
+rapidfuzz==3.14.6
+numpy==2.5.4
+
+# Graph, search, text
+networkx==3.7
+snowballstemmer==3.1.1
+tqdm==4.70.1
+
+# API
+fastapi==0.159.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+python-dotenv==1.2.4
+
+# Tests
+pytest==9.1.1
+mongomock==4.3.0
+httpx==0.28.1

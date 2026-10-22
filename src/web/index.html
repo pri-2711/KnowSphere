@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Map</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">◆</span> Knowledge Map</div>
+    <nav>
+      <a href="#documents" data-screen="documents" class="nav-link">Documents</a>
+      <a href="#map" data-screen="map" class="nav-link">Knowledge Map</a>
+      <a href="#ask" data-screen="ask" class="nav-link">Ask Questions</a>
+    </nav>
+    <div class="sidebar-stats" id="stats"></div>
+  </aside>
+
+  <main>
+    <!-- 1. Documents -->
+    <section id="screen-documents" class="screen">
+      <header class="screen-head">
+        <h1>Document upload</h1>
+        <p>Upload and manage your documents. Citation metadata can be corrected here.</p>
+      </header>
+      <label id="dropzone" class="dropzone" for="file-input">
+        <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden>
+        <span class="drop-icon">⇪</span>
+        <strong>Drag and drop PDF files here</strong>
+        <span>or click to upload</span>
+      </label>
+      <div id="upload-message" class="notice" hidden></div>
+      <div class="table-wrap">
+        <table class="doc-table">
+          <thead>
+            <tr><th>Document</th><th>Pages</th><th>Status</th><th>Title</th><th>Author / Editor</th><th>Year</th><th></th></tr>
+          </thead>
+          <tbody id="doc-rows"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="muted small">Citations use: [Document Title | Author/Editor | Year of Publication, p. N]. Empty fields show as "Unknown". Values come from <code>data/document_metadata.json</code>.</p>
+    </section>
+
+    <!-- 2. Knowledge map -->
+    <section id="screen-map" class="screen" hidden>
+      <header class="screen-head">
+        <h1>Interactive knowledge map</h1>
+        <p>Explore connected concepts. Node size shows importance, color shows community.</p>
+      </header>
+      <div class="toolbar">
+        <div class="search-box">
+          <input id="concept-search" type="search" placeholder="Search concepts…" autocomplete="off">
+          <ul id="suggestions" class="suggestions" hidden></ul>
+        </div>
+        <select id="filter-document"><option value="">All documents</option></select>
+        <select id="filter-type"><option value="">All types</option></select>
+        <label class="range">Min edge weight <input id="filter-weight" type="range" min="0" max="10" step="0.5" value="1"><span id="weight-value">1</span></label>
+        <select id="filter-limit">
+          <option value="100">100 nodes</option>
+          <option value="200" selected>200 nodes</option>
+          <option value="400">400 nodes</option>
+          <option value="800">800 nodes</option>
+        </select>
+      </div>
+      <div class="map-area">
+        <div id="cy"></div>
+        <aside id="panel" class="panel">
+          <p class="muted">Click a concept to see its description, aliases, related concepts and sources.</p>
+        </aside>
+      </div>
+      <p id="graph-info" class="muted small"></p>
+    </section>
+
+    <!-- 3. Ask -->
+    <section id="screen-ask" class="screen" hidden>
+      <header class="screen-head">
+        <h1>Question answering</h1>
+        <p>Answers are sentences copied from your documents, each with its source. Nothing is generated.</p>
+      </header>
+      <form id="ask-form" class="ask-form">
+        <input id="question" type="text" placeholder="Ask a question about your documents…" autocomplete="off">
+        <button type="submit" class="primary">Ask</button>
+        <button type="button" id="search-button" class="secondary">Search pages</button>
+      </form>
+      <div id="answer"></div>
+    </section>
+  </main>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <span id="modal-title"></span>
+      <button type="button" id="modal-close" class="icon-button" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <img id="modal-image" alt="Source page with the quote highlighted">
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
