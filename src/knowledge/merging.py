@@ -9,7 +9,10 @@ Rules, applied in this order:
 Rules 2 and 3 are blocked when the concept types are incompatible, the names
 contain different numbers, one name negates the other ("non-functional"), one
 name is a strict sub-phrase of the other ("design review" vs "preliminary design
-review"), or (embeddings only) the names share no word. A merge into an existing
+review"), or (embeddings only) the names share no word or the words that differ
+are not variants of each other (stem or prefix match such as "electric" and
+"electrical", or initials such as "U.S." and "United States"). The last check
+stops near-synonyms with different meaning ("network node" vs "terminal node"). A merge into an existing
 cluster must also pass against that cluster's canonical name, so chains cannot
 drift. Every decision is written to the merge report.
 """
@@ -135,7 +138,32 @@ def block_reason(a: Candidate, b: Candidate, rule: str) -> str | None:
         return "one name is a sub-phrase of the other"
     if rule == "embedding" and not ({stem(w) for w in words_a} & {stem(w) for w in words_b}):
         return "no shared word"
+    if rule == "embedding" and not _only_variants(words_a - words_b, words_b - words_a):
+        return "the differing words are not variants of each other"
     return None
+
+
+def _variant(a: str, b: str) -> bool:
+    """Same stem, or one stem is a prefix of the other (electric/electrical, view/viewpoint)."""
+    stem_a, stem_b = stem(a), stem(b)
+    short, long = sorted((stem_a, stem_b), key=len)
+    return stem_a == stem_b or (len(short) >= 4 and long.startswith(short))
+
+
+def _initials(letters: set[str], words: set[str]) -> bool:
+    """'u s' against 'united states': every letter is the initial of one word."""
+    return (all(len(letter) == 1 for letter in letters) and len(letters) == len(words)
+            and sorted(letters) == sorted(word[0] for word in words))
+
+
+def _only_variants(extra_a: set[str], extra_b: set[str]) -> bool:
+    """True when the words found in only one name are spelling or form variants of the other's."""
+    if not extra_a and not extra_b:
+        return True
+    if _initials(extra_a, extra_b) or _initials(extra_b, extra_a):
+        return True
+    return (all(any(_variant(a, b) for b in extra_b) for a in extra_a)
+            and all(any(_variant(b, a) for a in extra_a) for b in extra_b))
 
 
 class _UnionFind:

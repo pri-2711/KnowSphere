@@ -30,6 +30,13 @@ class FakePipeline:
     def knowledge_stages(self, progress) -> None:
         progress("finding concepts", 0.6)
 
+    def delete(self, document_id: str, progress) -> None:
+        self.files.append(f"deleted {document_id}")
+        self.store.documents.delete_one({"_id": document_id})
+
+    def replace(self, document_id: str, source: Path, filename: str, progress) -> None:
+        self.files.append(f"replaced {document_id} with {filename}")
+
 
 @pytest.fixture
 def client(seeded, metadata, tmp_path):
@@ -41,7 +48,8 @@ def client(seeded, metadata, tmp_path):
     doc.close()
     seeded.documents.update_one({"_id": "doc-a"}, {"$set": {"file_storage": {"uri": str(pdf)}}})
     pipeline = FakePipeline(seeded)
-    app = create_app(store=seeded, metadata=metadata, pipeline_factory=lambda: pipeline)
+    app = create_app(store=seeded, metadata=metadata, pipeline_factory=lambda: pipeline,
+                     watch_folder=tmp_path / "inbox", watch_interval=3600)
     with TestClient(app) as test_client:
         test_client.pipeline = pipeline
         yield test_client
@@ -55,6 +63,15 @@ def test_health_stats_and_frontend(client) -> None:
     assert page.status_code == 200 and "Knowledge Map" in page.text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/vendor/cytoscape.min.js").status_code == 200
+
+
+def test_frontend_is_always_revalidated(client) -> None:
+    for path in ("/", "/static/app.js", "/static/styles.css"):
+        assert client.get(path).headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/api/stats").headers
+    page = client.get("/").text
+    assert 'id="modal-fallback"' in page and 'id="modal" class="modal" hidden' in page
+    assert "[hidden] { display: none !important; }" in client.get("/static/styles.css").text
 
 
 def test_documents_and_metadata_edit(client) -> None:
@@ -124,3 +141,34 @@ def test_upload_runs_a_background_job(client) -> None:
     assert state["status"] == "done" and state["progress"] == 1.0
     assert client.pipeline.files == ["new.pdf"]
     assert any(row["filename"] == "new.pdf" for row in client.get("/api/documents").json())
+
+
+def _wait(client, job_id: str) -> dict:
+    for _ in range(100):
+        state = client.get(f"/api/jobs/{job_id}").json()
+        if state["status"] in ("done", "failed"):
+            return state
+        time.sleep(0.05)
+    return state
+
+
+def test_delete_and_replace_endpoints(client) -> None:
+    pdf = b"%PDF-1.4 replacement version"
+    job = client.put("/api/documents/doc-b/file", files={"file": ("v2.pdf", pdf, "application/pdf")}).json()
+    assert job["kind"] == "replace" and _wait(client, job["id"])["status"] == "done"
+    assert client.pipeline.files[-1] == "replaced doc-b with v2.pdf"
+    assert client.put("/api/documents/missing/file",
+                      files={"file": ("v2.pdf", pdf, "application/pdf")}).status_code == 404
+
+    job = client.delete("/api/documents/doc-b").json()
+    assert job["kind"] == "delete" and _wait(client, job["id"])["status"] == "done"
+    assert client.pipeline.files[-1] == "deleted doc-b"
+    assert "doc-b" not in {row["id"] for row in client.get("/api/documents").json()}
+    assert client.delete("/api/documents/doc-b").status_code == 404
+
+
+def test_watch_status(client, tmp_path) -> None:
+    status = client.get("/api/watch").json()
+    assert status["enabled"] is True
+    assert status["folder"] == str(tmp_path / "inbox")
+    assert status["interval_seconds"] == 3600

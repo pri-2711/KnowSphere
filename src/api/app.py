@@ -22,7 +22,9 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.config import METADATA_FILE, PROJECT_ROOT, WEB_DIR
+from src.config import METADATA_FILE, PROJECT_ROOT, WATCH_DIR, WATCH_ENABLED, WATCH_INTERVAL, WEB_DIR
+from src.envcheck import warn_if_needed
+from src.ingest.watcher import FolderWatcher, WatchService, process_events
 from src.metadata import MetadataStore
 from src.search.engine import KnowledgeService
 from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment, sha256_file
@@ -54,9 +56,10 @@ class JobManager:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="km-job")
         self._lock = threading.Lock()
 
-    def submit(self, filename: str, document_id: str, work: Callable[[Callable[[str, float], None]], Any]) -> dict:
+    def submit(self, filename: str, document_id: str | None, work: Callable[[Callable[[str, float], None]], Any],
+               kind: str = "upload") -> dict:
         job_id = uuid.uuid4().hex[:12]
-        job = {"id": job_id, "filename": filename, "document_id": document_id, "status": "queued",
+        job = {"id": job_id, "kind": kind, "filename": filename, "document_id": document_id, "status": "queued",
                "stage": "queued", "progress": 0.0, "error": None, "created_at": time.time()}
         with self._lock:
             self.jobs[job_id] = job
@@ -97,14 +100,17 @@ def _highlight_rects(page: Any, quote: str) -> list[Any]:
 
 
 def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore | None = None,
-               pipeline_factory: Callable[[], Any] | None = None) -> FastAPI:
-    """Build the app. Tests pass a mongomock-backed store and a fake pipeline."""
+               pipeline_factory: Callable[[], Any] | None = None,
+               watch_folder: Path | None = WATCH_DIR if WATCH_ENABLED else None,
+               watch_interval: float = WATCH_INTERVAL) -> FastAPI:
+    """Build the app. Tests pass a mongomock-backed store, a fake pipeline and their own watch folder."""
     state: dict[str, Any] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         client = None
         if store is None:
+            warn_if_needed()
             client, database = connect_from_environment()
             state["store"] = MongoKnowledgeStore(database, PROJECT_ROOT)
         else:
@@ -113,12 +119,27 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
         state["service"] = KnowledgeService(state["store"], state["metadata"])
         state["jobs"] = JobManager()
         state["pipeline"] = None
+        state["watch"] = None
+        if watch_folder is not None:
+            watch = WatchService(FolderWatcher(state["store"], watch_folder), submit_watch_events, watch_interval)
+            state["watch"] = watch
+            watch.start()
         yield
+        if state["watch"] is not None:
+            state["watch"].stop()
         if client is not None:
             client.close()
 
     app = FastAPI(title="Knowledge Map", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+    @app.middleware("http")
+    async def revalidate_frontend(request: Any, call_next: Callable[[Any], Any]) -> Any:
+        """Make browsers re-check the page, CSS and JS so they never keep a stale copy (ETag keeps it cheap)."""
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     def service() -> KnowledgeService:
         return state["service"]
@@ -131,6 +152,56 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
                 from src.pipeline import Pipeline
                 state["pipeline"] = Pipeline(state["store"], state["metadata"])
         return state["pipeline"]
+
+    def submit_watch_events(events: list[Any]) -> dict[str, Any]:
+        watch = state["watch"]
+
+        def work(progress: Callable[[str, float], None]) -> None:
+            try:
+                process_events(get_pipeline(), watch.watcher, events, progress)
+                progress("refreshing caches", 0.99)
+                service().load()
+            finally:
+                watch.busy.clear()
+
+        label = ", ".join(f"{event.kind} {event.relative_path}" for event in events)
+        return state["jobs"].submit(f"watched folder: {label}"[:200], None, work, kind="watch")
+
+    def run_job(kind: str, filename: str, document_id: str | None,
+                action: Callable[[Any, Callable[[str, float], None]], Any], temp_dir: Path | None = None) -> dict:
+        """Queue a document change followed by every knowledge stage and a cache reload."""
+        def work(progress: Callable[[str, float], None]) -> None:
+            try:
+                pipeline = get_pipeline()
+                action(pipeline, progress)
+                pipeline.knowledge_stages(progress)
+                progress("refreshing caches", 0.99)
+                service().load()
+            finally:
+                if temp_dir is not None:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+        return state["jobs"].submit(filename, document_id, work, kind=kind)
+
+    async def save_upload(file: UploadFile) -> tuple[Path, Path, str, str]:
+        """Store an uploaded PDF in a temporary folder; returns (folder, path, filename, document id)."""
+        filename = Path(file.filename or "document.pdf").name
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(400, "Only PDF files are accepted")
+        temp_dir = Path(tempfile.mkdtemp(prefix="km-upload-"))
+        temp_path = temp_dir / filename
+        with temp_path.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+        with temp_path.open("rb") as handle:
+            if handle.read(5) != b"%PDF-":
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise HTTPException(400, "The file is not a PDF")
+        return temp_dir, temp_path, filename, sha256_file(temp_path)
+
+    def require_document(document_id: str) -> dict[str, Any]:
+        document = state["store"].documents.find_one({"_id": document_id}, {"filename": 1})
+        if document is None:
+            raise HTTPException(404, "Unknown document")
+        return document
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -154,7 +225,7 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
         store_ = state["store"]
         rows = []
         known = set()
-        for document in store_.documents.find({}, {"filename": 1, "page_count": 1}):
+        for document in store_.documents.find({}, {"filename": 1, "page_count": 1, "sources": 1}):
             known.add(document["_id"])
             meta = state["metadata"].get(document["_id"])
             pages = store_.content_units.count_documents({"document_id": document["_id"], "unit_type": "page"})
@@ -167,14 +238,16 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
                 "concepts": store_.concepts.count_documents({"document_ids": document["_id"]}),
                 "title": meta.get("title"), "author": meta.get("author"), "year": meta.get("year"),
                 "detected_from": meta.get("detected_from", {}), "user_edited": meta.get("user_edited", []),
+                "sources": document.get("sources", []),
                 "status": status, "stage": job["stage"] if job else None,
                 "progress": job["progress"] if job else 1.0, "error": job["error"] if job else None,
             })
         for job in state["jobs"].jobs.values():
-            if job["document_id"] not in known:
+            # Uploads that are still being processed are shown before their document exists.
+            if job["kind"] == "upload" and job["document_id"] not in known and job["status"] != "done":
                 rows.append({"id": job["document_id"], "filename": job["filename"], "pages": 0, "images": 0,
                              "concepts": 0, "title": None, "author": None, "year": None, "detected_from": {},
-                             "user_edited": [], "status": job["status"], "stage": job["stage"],
+                             "user_edited": [], "sources": [], "status": job["status"], "stage": job["stage"],
                              "progress": job["progress"], "error": job["error"]})
         return rows
 
@@ -187,30 +260,31 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
 
     @app.post("/api/documents/upload")
     async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
-        filename = Path(file.filename or "document.pdf").name
-        if not filename.lower().endswith(".pdf"):
-            raise HTTPException(400, "Only PDF files are accepted")
-        temp_dir = Path(tempfile.mkdtemp(prefix="km-upload-"))
-        temp_path = temp_dir / filename
-        with temp_path.open("wb") as handle:
-            shutil.copyfileobj(file.file, handle)
-        with temp_path.open("rb") as handle:
-            if handle.read(5) != b"%PDF-":
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                raise HTTPException(400, "The file is not a PDF")
-        document_id = sha256_file(temp_path)
+        """Add a document."""
+        temp_dir, temp_path, filename, document_id = await save_upload(file)
+        return run_job("upload", filename, document_id,
+                       lambda pipeline, progress: pipeline.ingest_file(temp_path, filename, progress), temp_dir)
 
-        def work(progress: Callable[[str, float], None]) -> None:
-            try:
-                pipeline = get_pipeline()
-                pipeline.ingest_file(temp_path, filename, progress)
-                pipeline.knowledge_stages(progress)
-                progress("refreshing caches", 0.99)
-                service().load()
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+    @app.put("/api/documents/{document_id}/file")
+    async def replace_file(document_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+        """Edit a document by uploading a new version of its PDF; metadata edits carry over."""
+        require_document(document_id)
+        temp_dir, temp_path, filename, _ = await save_upload(file)
+        return run_job("replace", filename, document_id,
+                       lambda pipeline, progress: pipeline.replace(document_id, temp_path, filename, progress),
+                       temp_dir)
 
-        return state["jobs"].submit(filename, document_id, work)
+    @app.delete("/api/documents/{document_id}")
+    def delete_document(document_id: str) -> dict[str, Any]:
+        """Delete a document and everything derived from it, then rebuild concepts, edges and index."""
+        document = require_document(document_id)
+        return run_job("delete", document["filename"], document_id,
+                       lambda pipeline, progress: pipeline.delete(document_id, progress))
+
+    @app.get("/api/watch")
+    def watch_status() -> dict[str, Any]:
+        watch = state["watch"]
+        return watch.status() if watch is not None else {"enabled": False}
 
     @app.get("/api/jobs")
     def jobs() -> list[dict[str, Any]]:

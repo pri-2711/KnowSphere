@@ -9,6 +9,7 @@ const $ = (selector) => document.querySelector(selector);
 let cy = null;
 let documentsCache = [];
 let pollTimer = null;
+let replaceTarget = null;
 
 function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
@@ -66,6 +67,12 @@ function metadataInput(doc, field, cls = "") {
   return `<input class="${cls}" data-field="${field}" value="${escapeHtml(value)}" placeholder="Unknown"><span class="hint">${escapeHtml(source)}</span>`;
 }
 
+function sourceLabel(sources) {
+  if (!sources || !sources.length) return "";
+  return sources.map((source) => source === "upload" ? "uploaded" : source.startsWith("watch:") ?
+    `watched folder: ${source.slice(6)}` : source).join(", ");
+}
+
 function renderDocuments(docs) {
   documentsCache = docs;
   const rows = docs.map((doc) => {
@@ -74,13 +81,17 @@ function renderDocuments(docs) {
     const stage = busy ? `<span class="hint">${escapeHtml(doc.stage || "")}</span>` : "";
     const error = doc.error ? `<span class="hint">${escapeHtml(doc.error)}</span>` : "";
     return `<tr data-id="${escapeHtml(doc.id)}">
-      <td><span class="doc-name">${escapeHtml(doc.filename)}</span><span class="hint">${doc.images} images, ${doc.concepts} concepts</span></td>
+      <td><span class="doc-name">${escapeHtml(doc.filename)}</span><span class="hint">${doc.images} images, ${doc.concepts} concepts</span><span class="hint">${escapeHtml(sourceLabel(doc.sources))}</span></td>
       <td>${doc.pages}</td>
       <td><span class="badge ${escapeHtml(doc.status)}">${escapeHtml(doc.status)}</span>${progress}${stage}${error}</td>
       <td>${metadataInput(doc, "title")}</td>
       <td>${metadataInput(doc, "author")}</td>
       <td>${metadataInput(doc, "year", "year")}</td>
-      <td><button type="button" class="small save-meta" ${busy || !doc.pages ? "disabled" : ""}>Save</button></td>
+      <td><div class="actions">
+        <button type="button" class="small save-meta" ${busy || !doc.pages ? "disabled" : ""}>Save</button>
+        <button type="button" class="small replace-file" ${busy || !doc.pages ? "disabled" : ""} title="Upload a new version of this PDF">Replace file</button>
+        <button type="button" class="small danger delete-doc" ${busy || !doc.pages ? "disabled" : ""}>Delete</button>
+      </div></td>
     </tr>`;
   });
   $("#doc-rows").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">No documents yet.</td></tr>`;
@@ -90,14 +101,32 @@ function renderDocuments(docs) {
 async function loadDocuments() {
   try {
     const docs = await api("/api/documents");
-    renderDocuments(docs);
+    const table = $("#doc-rows");
+    // Do not redraw while the user is typing metadata or has unsaved edits.
+    const editing = table.contains(document.activeElement) && document.activeElement.tagName === "INPUT";
+    if (!editing && !table.querySelector("input[data-dirty]")) renderDocuments(docs);
+    else fillDocumentFilter(docs);
     const busy = docs.some((doc) => doc.status === "queued" || doc.status === "running");
     clearTimeout(pollTimer);
-    if (busy) pollTimer = setTimeout(loadDocuments, 1500);
-    else loadStats();
+    // Poll quickly while a job runs; otherwise slowly, so changes from the watched folder appear by themselves.
+    pollTimer = setTimeout(loadDocuments, busy ? 1500 : 5000);
+    if (!busy) loadStats();
+    loadWatchStatus();
   } catch (e) {
     $("#doc-rows").innerHTML = `<tr><td colspan="7" class="muted">Could not load documents: ${escapeHtml(e.message)}</td></tr>`;
   }
+}
+
+async function loadWatchStatus() {
+  try {
+    const watch = await api("/api/watch");
+    const box = $("#watch-status");
+    if (!watch.enabled) { box.textContent = "Folder watching is off."; return; }
+    const last = watch.last_scan ? new Date(watch.last_scan * 1000).toLocaleTimeString() : "not yet";
+    box.textContent = `Watching ${watch.folder} every ${watch.interval_seconds} s (last scan ${last}). ` +
+      "Add, change or remove PDFs there and they go through the whole pipeline." +
+      (watch.busy ? " Processing changes now." : "") + (watch.last_error ? ` Last error: ${watch.last_error}` : "");
+  } catch (e) { /* status is optional */ }
 }
 
 function notify(message, isError = false) {
@@ -126,14 +155,50 @@ function setupDocuments() {
   ["dragleave", "drop"].forEach((type) => zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.remove("dragging"); }));
   zone.addEventListener("drop", (event) => uploadFiles(event.dataTransfer.files));
   $("#file-input").addEventListener("change", (event) => { uploadFiles(event.target.files); event.target.value = ""; });
+  $("#replace-input").addEventListener("change", async (event) => {
+    const file = event.target.files[0];
+    event.target.value = "";
+    if (!file || !replaceTarget) return;
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      await api(`/api/documents/${encodeURIComponent(replaceTarget)}/file`, { method: "PUT", body: form });
+      notify(`Replacing with ${file.name}. The new version goes through the whole pipeline; metadata you edited is kept.`);
+    } catch (e) { notify(`Replace failed: ${e.message}`, true); }
+    replaceTarget = null;
+    loadDocuments();
+  });
+  $("#doc-rows").addEventListener("input", (event) => { event.target.dataset.dirty = "1"; });
   $("#doc-rows").addEventListener("click", async (event) => {
-    if (!event.target.classList.contains("save-meta")) return;
     const row = event.target.closest("tr");
+    if (event.target.classList.contains("replace-file")) {
+      replaceTarget = row.dataset.id;
+      $("#replace-input").click();
+      return;
+    }
+    if (event.target.classList.contains("delete-doc")) {
+      const button = event.target;
+      if (!button.classList.contains("confirm")) {
+        // Two-step confirm inside the page: the first click arms the button for a few seconds.
+        button.classList.add("confirm");
+        button.textContent = "Confirm delete";
+        setTimeout(() => { button.classList.remove("confirm"); button.textContent = "Delete"; }, 4000);
+        return;
+      }
+      try {
+        await api(`/api/documents/${encodeURIComponent(row.dataset.id)}`, { method: "DELETE" });
+        notify("Deleting the document and everything derived from it. The map and index are rebuilt.");
+      } catch (e) { notify(`Delete failed: ${e.message}`, true); }
+      loadDocuments();
+      return;
+    }
+    if (!event.target.classList.contains("save-meta")) return;
     const body = {};
     row.querySelectorAll("input[data-field]").forEach((input) => { body[input.dataset.field] = input.value.trim(); });
     try {
       await api(`/api/documents/${encodeURIComponent(row.dataset.id)}/metadata`, {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      row.querySelectorAll("input[data-dirty]").forEach((input) => delete input.dataset.dirty);
       notify("Metadata saved. Citations everywhere now use the new values.");
       loadDocuments();
     } catch (e) { notify(`Could not save metadata: ${e.message}`, true); }
@@ -335,12 +400,28 @@ function setupAsk() {
 }
 
 // ------------------------------------------------------------- shared handlers
+function showPageFallback(quote) {
+  $("#modal-loading").hidden = true;
+  $("#modal-image").hidden = true;
+  $("#modal-fallback-quote").textContent = quote || "";
+  $("#modal-fallback-quote").hidden = !quote;
+  $("#modal-fallback").hidden = false;
+}
+
 function openPage(unitId, label, quote) {
+  const image = $("#modal-image");
+  $("#modal-title").textContent = label || "Source page";
+  $("#modal-fallback").hidden = true;
+  image.hidden = true;
+  $("#modal").hidden = false;
+  if (!unitId) { showPageFallback(quote); return; }
+  $("#modal-loading").hidden = false;
   const params = new URLSearchParams();
   if (quote) params.set("quote", quote);
-  $("#modal-title").textContent = label;
-  $("#modal-image").src = `/api/pages/${encodeURIComponent(unitId)}/image?${params}`;
-  $("#modal").hidden = false;
+  // Only show the image once it has really loaded; otherwise show a clear message instead of a broken icon.
+  image.onload = () => { $("#modal-loading").hidden = true; image.hidden = false; };
+  image.onerror = () => showPageFallback(quote);
+  image.src = `/api/pages/${encodeURIComponent(unitId)}/image?${params}`;
 }
 
 document.addEventListener("click", (event) => {
@@ -353,7 +434,13 @@ document.addEventListener("click", (event) => {
     loadGraph(chip.dataset.concept);
   }
 });
-$("#modal-close").addEventListener("click", () => { $("#modal").hidden = true; $("#modal-image").removeAttribute("src"); });
+$("#modal-close").addEventListener("click", () => {
+  const image = $("#modal-image");
+  image.onload = image.onerror = null;  // removing the source must not trigger the fallback
+  image.removeAttribute("src");
+  image.hidden = true;
+  $("#modal").hidden = true;
+});
 $("#modal").addEventListener("click", (event) => { if (event.target.id === "modal") $("#modal-close").click(); });
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !$("#modal").hidden) $("#modal-close").click(); });
 

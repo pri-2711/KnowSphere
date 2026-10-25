@@ -28,11 +28,28 @@ from src.textutil import collapse_whitespace, concept_key, split_sentences, toke
 NOT_FOUND = "Not found in the uploaded documents."
 K1, B = 1.5, 0.75
 CONCEPT_BOOST = 2.0          # added to a page score per query concept mentioned on the page
+PHRASE_BOOST = 3.0           # added when the query words appear in the same order (scaled by phrase length)
+PHRASE_RERANK = 50           # how many BM25 pages are checked for the phrase
 TOP_PAGES = 10
 MAX_ANSWER_SENTENCES = 5
 MIN_COVERAGE = 0.6           # share of the query's IDF weight a sentence must contain
 MIN_SENTENCE_SCORE = 1.0
 MIN_SENTENCE_WORDS, MAX_SENTENCE_WORDS = 5, 120
+
+
+def phrase_match(token_text: str, phrase: list[str]) -> float:
+    """Score for the longest run of query terms (2 or more, in order) found in a token string.
+
+    ``token_text`` is " term term ... " (space padded). Returns 0 when no run of two terms matches,
+    otherwise (run length / phrase length) * min(occurrences, 3).
+    """
+    for size in range(len(phrase), 1, -1):
+        best = 0
+        for start in range(0, len(phrase) - size + 1):
+            best = max(best, token_text.count(" " + " ".join(phrase[start:start + size]) + " "))
+        if best:
+            return size / len(phrase) * min(best, 3)
+    return 0.0
 
 
 class CitationError(ValueError):
@@ -55,12 +72,15 @@ class KnowledgeService:
             started = time.perf_counter()
             database = self.store.database
             self.pages: dict[str, dict[str, Any]] = {}
+            self._page_tokens: dict[str, str] = {}
             self.page_by_key: dict[tuple[str, int], str] = {}
             for unit in self.store.content_units.find({"unit_type": "page"},
                                                       {"text": 1, "document_id": 1, "page_number": 1}):
                 self.pages[unit["_id"]] = {"text": unit.get("text") or "", "document_id": unit["document_id"],
                                            "page_number": unit["page_number"]}
                 self.page_by_key[(unit["document_id"], unit["page_number"])] = unit["_id"]
+                # Stemmed tokens per page, used for phrase matching without tokenizing at query time.
+                self._page_tokens[unit["_id"]] = " " + " ".join(tokenize(unit.get("text") or "")) + " "
 
             self.postings: dict[str, list[tuple[str, int]]] = {
                 record["_id"]: [(unit, tf) for unit, tf in record["postings"]]
@@ -153,9 +173,20 @@ class KnowledgeService:
                 scores[unit_id] += idf * tf * (K1 + 1) / (tf + K1 * (1 - B + B * length / self.avg_len))
         return scores
 
+    def page_token_text(self, unit_id: str) -> str:
+        cached = self._page_tokens.get(unit_id)
+        if cached is None:
+            cached = " " + " ".join(tokenize(self.pages[unit_id]["text"])) + " "
+            self._page_tokens[unit_id] = cached
+        return cached
+
     def rank_pages(self, query: str, document_id: str | None = None) -> tuple[list[tuple[str, float]], list[str], list[str]]:
-        terms = list(dict.fromkeys(tokenize(query)))
+        phrase = tokenize(query)
+        terms = list(dict.fromkeys(phrase))
         scores = self.bm25(terms)
+        if len(phrase) >= 2:
+            for unit_id, _ in sorted(scores.items(), key=lambda item: -item[1])[:PHRASE_RERANK]:
+                scores[unit_id] += PHRASE_BOOST * phrase_match(self.page_token_text(unit_id), phrase)
         concept_ids = self.match_concepts(query)
         for concept_id in concept_ids:
             for unit_id in self.concepts[concept_id]["mention_units"]:
@@ -222,7 +253,7 @@ class KnowledgeService:
         started = time.perf_counter()
         with self._lock:
             ranked, terms, query_concepts = self.rank_pages(question)
-            result = self._answer(ranked, terms, query_concepts)
+            result = self._answer(ranked, terms, query_concepts, tokenize(question))
         result["question"] = question
         result["took_ms"] = round((time.perf_counter() - started) * 1000, 2)
         return result
@@ -231,7 +262,8 @@ class KnowledgeService:
         return {"answer_found": False, "message": NOT_FOUND, "groups": [], "sentences": [], "concepts": [],
                 "terms": terms}
 
-    def _answer(self, ranked: list[tuple[str, float]], terms: list[str], query_concepts: list[str]) -> dict[str, Any]:
+    def _answer(self, ranked: list[tuple[str, float]], terms: list[str], query_concepts: list[str],
+                phrase: list[str] | None = None) -> dict[str, Any]:
         if not terms or not ranked:
             return self._not_found(terms)
         weights = {term: self.idf(term) for term in terms}
@@ -260,6 +292,8 @@ class KnowledgeService:
                 concepts_here = self.sentence_concepts.get((unit_id, start, end), set())
                 score += 0.5 * len(concepts_here & query_concept_set)
                 score += 0.5 * page_score / top_score
+                if phrase and len(phrase) >= 2:
+                    score += PHRASE_BOOST * phrase_match(" " + " ".join(tokens) + " ", phrase)
                 if score < MIN_SENTENCE_SCORE:
                     continue
                 candidates.append((score, coverage, unit_id, start, end))

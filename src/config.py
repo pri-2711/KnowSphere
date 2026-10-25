@@ -26,6 +26,10 @@ REPORT_DIR = OUTPUT_DIR / "reports"
 LOG_DIR = OUTPUT_DIR / "logs"
 WEB_DIR = PROJECT_ROOT / "src" / "web"
 
-GLINER_MODEL = os.environ.get("KM_GLINER_MODEL", "urchade/gliner_medium-v2.1")
+WATCH_DIR = Path(os.environ.get("KM_WATCH_DIR", DATA_DIR / "inbox"))   # folder watched for PDFs
+WATCH_INTERVAL = float(os.environ.get("KM_WATCH_INTERVAL", "5"))      # seconds between scans
+WATCH_ENABLED = os.environ.get("KM_WATCH_ENABLED", "1") != "0"        # the API starts the watcher
+
+GLINER_MODEL =os.environ.get("KM_GLINER_MODEL", "urchade/gliner_medium-v2.1")
 EMBEDDING_MODEL = os.environ.get("KM_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 CAPTION_MODEL = os.environ.get("KM_CAPTION_MODEL", "nlpconnect/vit-gpt2-image-captioning")

@@ -39,8 +39,9 @@ def test_missing_metadata_stays_unknown(tmp_path) -> None:
     doc.save(pdf)
     doc.close()
     detected = detect_metadata(pdf)
+    assert detected["title"] is None            # one font size: no title stands out, nothing is guessed
     assert detected["author"] is None and detected["year"] is None
-    assert format_citation(detected, 4).endswith("| Unknown | Unknown, p. 4]")
+    assert format_citation(detected, 4) == "[Unknown | Unknown | Unknown, p. 4]"
 
 
 def test_user_edits_survive_new_detection(tmp_path) -> None:

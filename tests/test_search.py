@@ -8,7 +8,7 @@ import pytest
 from conftest import page_id
 
 from src.metadata import format_citation
-from src.search.engine import NOT_FOUND, CitationError
+from src.search.engine import NOT_FOUND, CitationError, phrase_match
 from src.search.index import build_index
 
 CITATION = re.compile(r"^\[[^|\]]+ \| [^|\]]+ \| [^|\]]+, p\. \d+\]$")
@@ -121,3 +121,10 @@ def test_metadata_edit_changes_citations(service, metadata) -> None:
     result = service.ask("verification and validation")
     citations = {sentence["citation"] for sentence in result["sentences"] if sentence["document_id"] == "doc-b"}
     assert citations == {"[Engineering Fundamentals | Defense Press | 2001, p. 1]"}
+
+
+def test_phrase_match_rewards_words_in_query_order() -> None:
+    phrase = ["preliminari", "design", "review"]
+    assert phrase_match(" a preliminari design review b preliminari design review ", phrase) == 2.0
+    assert phrase_match(" design review only ", phrase) == pytest.approx(2 / 3)
+    assert phrase_match(" review design preliminari ", phrase) == 0.0

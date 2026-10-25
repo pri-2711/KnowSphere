@@ -3,6 +3,9 @@
 Examples (from the project root, inside the .venv):
     python -m src.pipeline run                 # both books in data/raw_pdfs, then every stage
     python -m src.pipeline ingest my.pdf       # add a new PDF, then every stage
+    python -m src.pipeline watch               # keep data/inbox in sync (add, change, remove PDFs)
+    python -m src.pipeline documents           # list document IDs
+    python -m src.pipeline delete ID_OR_NAME   # delete a document and rebuild
     python -m src.pipeline concepts|merge|relations|index|export|stats
 """
 
@@ -17,15 +20,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.config import (CAPTION_MODEL, EMBEDDING_MODEL, EXTRACTED_DIR, GLINER_MODEL, IMAGE_DIR, METADATA_FILE,
-                        RAW_PDF_DIR, REPORT_DIR, UPLOAD_DIR, VAULT_DIR, PROJECT_ROOT)
-from src.ingest.documents import ingest_pdf, stage_upload
+                        RAW_PDF_DIR, REPORT_DIR, UPLOAD_DIR, VAULT_DIR, PROJECT_ROOT, WATCH_DIR,
+                        WATCH_INTERVAL)
+from src.envcheck import warn_if_needed
+from src.ingest.documents import delete_document, ingest_pdf, is_tombstoned, remove_source, stage_upload
 from src.ingest.images import VitCaptioner, link_images_to_concepts
 from src.knowledge.concept_extraction import GlinerExtractor, configure_logging, extract_concepts
 from src.knowledge.merging import FastEmbedder, merge_concepts
 from src.knowledge.relationships import store_relationships
 from src.metadata import MetadataStore
 from src.search.index import build_index
-from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment
+from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment, sha256_file
 
 logger = logging.getLogger("knowledge_map.pipeline")
 Progress = Callable[[str, float], None]
@@ -39,12 +44,16 @@ class Pipeline:
     """Runs the stages in order. Every stage is idempotent and skips unchanged input."""
 
     def __init__(self, store: MongoKnowledgeStore, metadata: MetadataStore, caption_images: bool = False,
-                 extractor: GlinerExtractor | None = None, embedder: Any = None) -> None:
+                 extractor: GlinerExtractor | None = None, embedder: Any = None,
+                 upload_dir: Path = UPLOAD_DIR, image_dir: Path = IMAGE_DIR, report_dir: Path = REPORT_DIR) -> None:
         self.store = store
         self.metadata = metadata
         self.captioner = VitCaptioner(CAPTION_MODEL) if caption_images else None
         self._extractor = extractor
         self._embedder = embedder
+        self.upload_dir = upload_dir
+        self.image_dir = image_dir
+        self.report_dir = report_dir
 
     @property
     def extractor(self) -> GlinerExtractor:
@@ -59,14 +68,43 @@ class Pipeline:
         return self._embedder
 
     def ingest_raw_books(self, progress: Progress = _noop) -> list[dict[str, Any]]:
-        pdfs = sorted(RAW_PDF_DIR.glob("*.pdf"), key=lambda path: path.name.casefold())
-        return [ingest_pdf(self.store, self.metadata, pdf, EXTRACTED_DIR, IMAGE_DIR, self.captioner, progress)
-                for pdf in pdfs]
+        """Ingest data/raw_pdfs (read only). Books deleted in the app stay deleted."""
+        results = []
+        for pdf in sorted(RAW_PDF_DIR.glob("*.pdf"), key=lambda path: path.name.casefold()):
+            document_id = sha256_file(pdf)
+            if is_tombstoned(self.store, document_id):
+                results.append({"document_id": document_id, "filename": pdf.name, "skipped": "deleted in the app"})
+                continue
+            results.append(ingest_pdf(self.store, self.metadata, pdf, EXTRACTED_DIR, self.image_dir, self.captioner,
+                                      progress, source=f"raw_pdfs/{pdf.name}"))
+        return results
 
-    def ingest_file(self, source: Path, filename: str | None = None, progress: Progress = _noop) -> dict[str, Any]:
-        pdf_path, _ = stage_upload(source, filename or source.name, UPLOAD_DIR)
-        return ingest_pdf(self.store, self.metadata, pdf_path, pdf_path.parent / "extracted", IMAGE_DIR,
-                          self.captioner, progress)
+    def ingest_file(self, source: Path, filename: str | None = None, progress: Progress = _noop,
+                    source_label: str = "upload") -> dict[str, Any]:
+        """Add a PDF (upload, CLI or watched folder). The file is copied to data/uploads/<hash>/."""
+        pdf_path, _ = stage_upload(source, filename or source.name, self.upload_dir)
+        return ingest_pdf(self.store, self.metadata, pdf_path, pdf_path.parent / "extracted", self.image_dir,
+                          self.captioner, progress, source=source_label)
+
+    def delete(self, document_id: str, progress: Progress = _noop) -> dict[str, Any]:
+        """Delete a document and all derived records; it will not be re-added automatically."""
+        progress("deleting document", 0.1)
+        return delete_document(self.store, self.metadata, document_id, self.upload_dir, self.image_dir)
+
+    def replace(self, document_id: str, source: Path, filename: str | None = None, progress: Progress = _noop,
+                source_label: str = "upload") -> dict[str, Any]:
+        """Add a new version of a document, keep the user's metadata edits, and delete the old version."""
+        added = self.ingest_file(source, filename, progress, source_label)
+        new_id = added["document_id"]
+        if new_id != document_id:
+            self.metadata.carry_over_edits(document_id, new_id)
+            progress("deleting old version", 0.42)
+            added["replaced"] = self.delete(document_id)
+        return added
+
+    def remove_source(self, document_id: str, source: str, progress: Progress = _noop) -> dict[str, Any]:
+        progress("removing source", 0.1)
+        return remove_source(self.store, self.metadata, document_id, source, self.upload_dir, self.image_dir)
 
     def knowledge_stages(self, progress: Progress = _noop, show_bar: bool = False) -> dict[str, Any]:
         timings: dict[str, Any] = {}
@@ -84,7 +122,7 @@ class Pipeline:
 
         timed("concepts", 0.45, lambda: extract_concepts(self.store, self.extractor, progress=concept_progress,
                                                           show_bar=show_bar))
-        timed("merge", 0.8, lambda: merge_concepts(self.store, self.embedder, REPORT_DIR / "merge_report.csv"))
+        timed("merge", 0.8, lambda: merge_concepts(self.store, self.embedder, self.report_dir / "merge_report.csv"))
         timed("link_images", 0.88, lambda: link_images_to_concepts(self.store))
         timed("relations", 0.9, lambda: store_relationships(self.store))
         timed("index", 0.96, lambda: build_index(self.store))
@@ -109,9 +147,17 @@ def main(argv: list[str] | None = None) -> int:
                        ("export", "Write the Obsidian vault"), ("stats", "Print collection counts and graph stats"),
                        ("metadata", "Detect citation metadata for documents that have none")):
         sub.add_parser(name, help=text)
+    sub.add_parser("documents", help="List documents with ID, pages and sources")
+    delete = sub.add_parser("delete", help="Delete documents (by ID, ID prefix or filename), then rebuild")
+    delete.add_argument("documents", nargs="+")
+    watch = sub.add_parser("watch", help=f"Watch a folder for added, changed or removed PDFs (default {WATCH_DIR})")
+    watch.add_argument("--folder", type=Path, default=WATCH_DIR)
+    watch.add_argument("--interval", type=float, default=WATCH_INTERVAL, help="Seconds between scans")
+    watch.add_argument("--once", action="store_true", help="Scan twice (to confirm files are stable), apply, exit")
     args = parser.parse_args(argv)
 
     configure_logging()
+    warn_if_needed()
     client = None
     try:
         client, database = connect_from_environment()
@@ -131,6 +177,31 @@ def main(argv: list[str] | None = None) -> int:
             REPORT_DIR.mkdir(parents=True, exist_ok=True)
             (REPORT_DIR / "pipeline_run.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
             _print(report)
+        elif args.command == "documents":
+            _print([{"id": document["_id"], "filename": document["filename"], "pages": document.get("page_count"),
+                     "sources": document.get("sources", [])} for document in store.documents.find()])
+        elif args.command == "delete":
+            results = []
+            for key in args.documents:
+                matches = [document["_id"] for document in store.documents.find({}, {"filename": 1})
+                           if document["_id"].startswith(key) or document["filename"] == key]
+                if len(matches) != 1:
+                    raise ValueError(f"'{key}' matches {len(matches)} documents; use the ID from 'documents'")
+                results.append(pipeline.delete(matches[0]))
+            _print({"deleted": results, "stages": pipeline.knowledge_stages()})
+        elif args.command == "watch":
+            from src.ingest.watcher import FolderWatcher, process_events
+            watcher = FolderWatcher(store, args.folder)
+            print(f"Watching {args.folder.resolve()} every {args.interval} s. Press Ctrl+C to stop.")
+            scans = 0
+            while True:
+                events = watcher.scan()
+                scans += 1
+                if events:
+                    _print(process_events(pipeline, watcher, events))
+                if args.once and scans >= 2:
+                    break
+                time.sleep(args.interval if not args.once else 0.5)
         elif args.command == "concepts":
             _print(extract_concepts(store, pipeline.extractor, show_bar=True))
         elif args.command == "merge":

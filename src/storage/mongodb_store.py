@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 
 try:
     from pymongo import ASCENDING, MongoClient
@@ -169,8 +170,12 @@ class MongoKnowledgeStore:
         extracted_dir: Path,
         raw_pdf_dir: Path,
         metadata_path: Path | None = None,
+        only_stems: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Ingest existing ``*.pages.jsonl`` sidecars without reprocessing PDFs."""
+        """Ingest existing ``*.pages.jsonl`` sidecars without reprocessing PDFs.
+
+        ``only_stems`` limits ingestion to sidecars of these PDF file stems (default: all).
+        """
         extracted_dir = extracted_dir.resolve()
         raw_pdf_dir = raw_pdf_dir.resolve()
         if not extracted_dir.is_dir():
@@ -191,6 +196,8 @@ class MongoKnowledgeStore:
             "sidecars": 0,
         }
         sidecars = sorted(extracted_dir.glob("*.pages.jsonl"), key=lambda path: path.name.casefold())
+        if only_stems is not None:
+            sidecars = [path for path in sidecars if path.name[:-len(".pages.jsonl")] in only_stems]
         for sidecar in sidecars:
             records = self._read_sidecar(sidecar)
             if not records:
@@ -315,7 +322,8 @@ class MongoKnowledgeStore:
             asset_path = (sidecar.parent / unquote(parsed.path)).resolve()
             storage_uri = _relative_file_uri(asset_path, self.project_root)
         elif parsed.scheme == "file":
-            asset_path = Path(unquote(parsed.path)).resolve()
+            # url2pathname turns "/D:/dir/file.pdf" into a valid Windows path (no-op elsewhere).
+            asset_path = Path(url2pathname(parsed.path)).resolve()
             storage_uri = _relative_file_uri(asset_path, self.project_root)
         if asset_ref["kind"] == "source_page":
             if asset_path is None or not asset_path.is_file():

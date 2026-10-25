@@ -52,8 +52,8 @@ def _title_case_if_shouting(value: str) -> str:
     return value.title() if value.isupper() else value
 
 
-def _largest_text(page: Any) -> str | None:
-    """Return the text lines on a page set in the largest font size."""
+def _lines(page: Any) -> list[tuple[float, str]]:
+    """(font size, text) for every text line on a page."""
     lines: list[tuple[float, str]] = []
     for block in page.get_text("dict").get("blocks", []):
         for line in block.get("lines", []):
@@ -61,12 +61,31 @@ def _largest_text(page: Any) -> str | None:
             sizes = [span.get("size", 0) for span in line.get("spans", []) if span.get("text", "").strip()]
             if text and sizes:
                 lines.append((max(sizes), text))
+    return lines
+
+
+def _body_size(pages: list[list[tuple[float, str]]]) -> float:
+    """The font size carrying the most characters over the first pages (the running text)."""
+    chars_by_size: dict[float, int] = {}
+    for lines in pages:
+        for size, text in lines:
+            chars_by_size[round(size, 1)] = chars_by_size.get(round(size, 1), 0) + len(text)
+    return max(chars_by_size.items(), key=lambda item: item[1])[0] if chars_by_size else 0.0
+
+
+def _largest_text(lines: list[tuple[float, str]], body: float) -> str | None:
+    """Return the lines of page 1 set in the largest font size, if that size stands out from the body text."""
     if not lines:
         return None
     largest = max(size for size, _ in lines)
+    # A page set in one size has no detectable title, so nothing is guessed.
+    if largest < body * 1.25:
+        return None
     # Lines within 15 percent of the largest size form a multi-line title.
-    title = " ".join(text for size, text in lines if size >= largest * 0.85)
-    return _clean(title)
+    title = _clean(" ".join(text for size, text in lines if size >= largest * 0.85))
+    if not title or len(title) > 150 or len(title.split()) > 20:
+        return None
+    return title
 
 
 def detect_metadata(pdf_path: Path) -> dict[str, Any]:
@@ -77,7 +96,8 @@ def detect_metadata(pdf_path: Path) -> dict[str, Any]:
     with fitz.open(pdf_path) as doc:
         info = doc.metadata or {}
         pages = [doc[index].get_text("text", sort=True) for index in range(min(FIRST_PAGES, len(doc)))]
-        first_page_title = _largest_text(doc[0]) if len(doc) else None
+        page_lines = [_lines(doc[index]) for index in range(min(FIRST_PAGES, len(doc)))]
+        first_page_title = _largest_text(page_lines[0], _body_size(page_lines)) if page_lines else None
 
     title = _clean(info.get("title"))
     if title and len(title.split()) >= 2 and title.lower() not in _JUNK_TITLES:
@@ -189,6 +209,20 @@ class MetadataStore:
             self._write(data)
             self._mtime = None
         return entry
+
+
+    def remove(self, document_id: str) -> None:
+        data = dict(self.load())
+        if data.pop(document_id, None) is not None:
+            with self._lock:
+                self._write(data)
+                self._mtime = None
+
+    def carry_over_edits(self, old_id: str, new_id: str) -> dict[str, Any]:
+        """When a document is replaced by a new version, keep the fields the user edited."""
+        old = self.get(old_id)
+        edited = {field: old.get(field) for field in old.get("user_edited", [])}
+        return self.update(new_id, edited) if edited else self.get(new_id)
 
 
 def format_citation(metadata: Mapping[str, Any], page_number: int) -> str:

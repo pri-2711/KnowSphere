@@ -10,6 +10,8 @@ Answers are extractive. The system never writes its own text and calls no extern
 
 ## Features
 
+- **Add, edit, delete documents**: upload a PDF, replace it with a new version, edit its citation metadata, or delete it with everything derived from it. Concepts, relationships and the index are rebuilt after every change.
+- **Watched folder**: PDFs added to, changed in or removed from `data/inbox/` go through the whole pipeline automatically while the app (or `python -m src.pipeline watch`) runs.
 - **Ingestion**: PDF upload from the web app or the command line. Page text comes from PyMuPDF, with Tesseract OCR for scanned pages. Embedded images are saved with page, bounding box, nearby caption and surrounding text. Optional image captioning (ViT-GPT2) is off by default and is stored apart from the source text.
 - **Citation metadata**: title, author/editor and year are detected from PDF metadata and the first pages, written to `data/document_metadata.json`, and shown as "Unknown" when not found. You can edit them in the file or on the Documents screen; citations everywhere update.
 - **Concepts**: GLiNER finds concept spans, batched and resumable. Table-of-contents pages, generic words and fragments are filtered out.
@@ -62,7 +64,26 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-All packages go into `.venv`; your global Python is not changed. The first pipeline run downloads the GLiNER model (about 0.8 GB) and the bge-small ONNX model (about 0.1 GB) into the local model cache.
+All packages go into `.venv`; your global Python is not changed.
+
+On Linux, `pip` installs the large CUDA build of torch by default. For CPU only, install torch first from the CPU index, then the rest:
+
+```bash
+python -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.txt
+``` The first pipeline run downloads the GLiNER model (about 0.8 GB) and the bge-small ONNX model (about 0.1 GB) into the local model cache.
+
+### Version conflicts with other projects
+
+This project pins exact versions of torch, transformers, Pillow, numpy and others. Other projects on the same machine may need different versions (for example `facenet-pytorch` needs torch below 2.3 and Pillow below 10.3; `streamlit` 1.45 needs Pillow below 12). Do not install `requirements.txt` into your global Python. Keep this project in its own `.venv`, and other projects in their own environments.
+
+Check which interpreter and versions you are using:
+
+```bash
+python -m src.envcheck
+```
+
+It prints `OK` inside a correct `.venv`. Otherwise it lists every package whose version differs from `requirements.txt`. The pipeline and the server print the same warning at start. In VS Code, choose the interpreter `.venv\Scripts\python.exe` (Windows) or `.venv/bin/python` (Linux/macOS) with "Python: Select Interpreter".
 
 ## MongoDB setup
 
@@ -94,12 +115,34 @@ python -m src.pipeline export
 
 `python -m src.pipeline run` is safe to repeat. Unchanged documents and pages are skipped by their SHA-256 hash, so a second run only redoes the fast stages (merging, relationships, index).
 
+## Adding, changing and deleting documents
+
+| What you want | In the web app (Documents screen) | Watched folder `data/inbox/` | Command line |
+|---|---|---|---|
+| Add a PDF | Drag and drop, or click to upload | Copy the PDF into the folder | `python -m src.pipeline ingest FILE.pdf` |
+| New version of a PDF | "Replace file" on its row | Overwrite the file with the new version | Delete, then ingest |
+| Fix title, author/editor, year | Edit the fields, then "Save" | | Edit `data/document_metadata.json` |
+| Delete | "Delete", then "Confirm delete" | Remove the file from the folder | `python -m src.pipeline delete ID_OR_FILENAME` |
+
+What happens:
+
+- **Add**: text, images and metadata are extracted, then concepts, merging, image links, relationships and the index are updated. Pages already processed (same text hash) are not processed again.
+- **Replace**: the new version is added, metadata fields you edited are copied to it, and the old version is deleted.
+- **Delete**: the document's pages, images, image files, concept mentions, index entries and metadata entry are removed, then concepts, relationships and the index are rebuilt. Concepts that only came from this document disappear. Files in `data/raw_pdfs/` are never deleted. A document deleted in the app is remembered (`deleted_documents`), so `pipeline run` and the folder watcher do not add the same file back. Uploading it again on purpose adds it back.
+- **Watched folder**: the app scans `data/inbox/` every 5 seconds (change with `KM_WATCH_DIR`, `KM_WATCH_INTERVAL`; turn off with `KM_WATCH_ENABLED=0` in `.env`). A file is processed once its size and time have not changed for one scan, so files still being copied are not read. If the same PDF is also uploaded or in `data/raw_pdfs/`, removing it from the folder keeps the document.
+
+Each change runs as one background job. Jobs run one at a time, and the Documents screen shows their progress.
+
 ## CLI reference
 
 | Command | What it does |
 |---|---|
 | `python -m src.pipeline run` | Ingests `data/raw_pdfs/*.pdf` (text, metadata, images), then concepts, merge, image links, relationships and index. Writes timings to `output/reports/pipeline_run.json`. |
 | `python -m src.pipeline ingest FILE.pdf [...]` | Copies new PDFs to `data/uploads/<hash>/`, ingests them, then runs every stage. |
+| `python -m src.pipeline watch [--folder DIR] [--interval S]` | Watches a folder (default `data/inbox/`) without the web app and processes added, changed and removed PDFs. |
+| `python -m src.pipeline documents` | Lists documents with ID, pages and sources. |
+| `python -m src.pipeline delete ID_OR_FILENAME [...]` | Deletes documents (ID, ID prefix or filename), then rebuilds. |
+| `python -m src.envcheck` | Checks the interpreter and package versions against `requirements.txt`. |
 | `python -m src.pipeline concepts` | Concept mention extraction only (resumable, progress bar). |
 | `python -m src.pipeline merge` | Rebuilds concept nodes and aliases, writes `output/reports/merge_report.csv`, links images to concepts. |
 | `python -m src.pipeline relations` | Rebuilds relationships. |
@@ -122,7 +165,10 @@ Logs are written to `output/logs/pipeline.log`.
 |---|---|
 | `GET /api/health`, `GET /api/stats` | Server and database status, counts. |
 | `POST /api/documents/upload` | Upload a PDF; processing runs as a background job. |
-| `GET /api/documents`, `GET /api/jobs/{id}` | Documents with status and progress. |
+| `PUT /api/documents/{id}/file` | Replace a document with a new version of its PDF (background job). |
+| `DELETE /api/documents/{id}` | Delete a document and everything derived from it (background job). |
+| `GET /api/documents`, `GET /api/jobs`, `GET /api/jobs/{id}` | Documents with sources, status and progress; jobs. |
+| `GET /api/watch` | Watched folder, scan interval, last scan, last changes. |
 | `PUT /api/documents/{id}/metadata` | Edit title, author/editor, year. |
 | `GET /api/concepts/autocomplete?q=` | Prefix autocomplete over names and aliases. |
 | `GET /api/concepts/search?q=` | Concepts named in the text, then prefix matches. |
@@ -138,14 +184,16 @@ Logs are written to `output/logs/pipeline.log`.
 ```
 data/raw_pdfs/              original books (never modified)
 data/extracted/             text and .pages.jsonl from the original extraction step
-data/uploads/               uploaded PDFs, one folder per file hash (gitignored)
+data/inbox/                 watched folder: add, change or remove PDFs here
+data/uploads/               copies of uploaded and watched PDFs, one folder per file hash (gitignored)
 data/images/                extracted images (gitignored)
 data/document_metadata.json citation metadata, editable
 docs/                       DATA_FLOW.md, REPORT.md, mongodb_storage.md
 output/                     obsidian_vault/, reports/, logs/ (gitignored)
 src/pdf_extraction.py       PyMuPDF + Tesseract page extraction (unchanged)
 src/storage/                MongoDB store and ingestion (unchanged behaviour)
-src/ingest/                 upload handling, image extraction
+src/ingest/                 add/replace/delete documents, folder watcher, image extraction
+src/envcheck.py             interpreter and package version check
 src/knowledge/              concept extraction, merging, relationships
 src/search/                 inverted index, BM25, extractive answers, citation validator
 src/graph/                  NetworkX graph builder
@@ -167,6 +215,9 @@ tests/                      pytest suite (mongomock, mocked models)
 - Page numbers in citations are PDF page numbers (1-based), not the numbers printed on the pages.
 - Metadata detection only reads PDF metadata and the first 8 pages. Check `data/document_metadata.json` and correct it if needed.
 - Image understanding is limited to captions and nearby text. Diagram content is not interpreted unless the optional captioner is enabled, and model captions are never used as evidence.
-- Concept extraction runs on CPU. It takes about 1 second per page on the development machine (see `docs/REPORT.md`).
-- One processing job runs at a time. Job progress is kept in memory and is lost when the server restarts.
+- Concept extraction runs on CPU: 1.4 to 3.5 seconds per page on the development machine depending on other load, so about 16 minutes for the two books without other load (see `docs/REPORT.md`).
+- One processing job runs at a time. Job progress is kept in memory and is lost when the server restarts. The documents themselves and the watch state are stored in MongoDB.
+- Every add, replace or delete rebuilds concept merging, relationships and the index for the whole collection. With the two books this took 8 to 31 seconds per change after the models were loaded (see `docs/REPORT.md`), and it grows with the collection.
+- The folder watcher polls; changes are picked up within about two scan intervals (10 seconds by default), not instantly.
+- On two-column pages the original extraction (PyMuPDF `sort=True`) can interleave the columns, so some quoted sentences mix text from both columns. Quotes are still verbatim and correctly cited.
 - There is no user authentication. The app is meant to run on your own machine.

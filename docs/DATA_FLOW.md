@@ -87,6 +87,37 @@ Details:
 - **Optional captioning** (`--caption-images`, off by default) runs a ViT-GPT2 model. Its output is stored as `model_caption`, marked with the model name, and is never used for answers or citations.
 - **Metadata**: title, author/editor and year are taken only from text that is really there: PDF metadata fields (rejected when they look like junk such as "Intro" or a single user name), the largest text on page 1, "Edited by" / "Prepared by" lines, and copyright or date lines in the first 8 pages. Each value records where it was found. Anything not found is `null` and shows as "Unknown". The user can edit the file or use the form on the Documents screen; edited fields are never overwritten by detection.
 
+### Changing and deleting documents, and the watched folder
+
+```mermaid
+flowchart TD
+    subgraph Triggers
+        U[Upload in the app<br/>or pipeline ingest]
+        R[Replace file in the app]
+        D[Delete in the app<br/>or pipeline delete]
+        W[Watched folder data/inbox<br/>scan every 5 s]
+    end
+    W -->|new file, stable for one scan| ADD
+    W -->|content hash changed| REP
+    W -->|file removed| RS[Remove this source]
+    U --> ADD[Add: ingest_pdf<br/>extraction, pages, metadata, images]
+    R --> REP[Replace: add new version,<br/>copy edited metadata, delete old]
+    D --> DEL[Delete: remove pages, images, files,<br/>mentions, index entries, metadata<br/>+ tombstone]
+    RS -->|no other source left| DEL0[Delete without tombstone]
+    REP --> ADD
+    REP --> DEL
+    ADD --> STAGES[Knowledge stages:<br/>concepts for new pages only, merge,<br/>image links, relationships, index]
+    DEL --> STAGES
+    DEL0 --> STAGES
+    STAGES --> RELOAD[API reloads its in-memory caches]
+```
+
+- Every document lists its **sources**: `upload`, `raw_pdfs/<file>` or `watch:<path in the folder>`. Removing a file from the watched folder only removes that source. The document is deleted when no source is left.
+- **Delete** removes the document's `content_units`, `assets`, `extraction_state`, `concept_mentions`, `page_terms` and `image_state` records, its folders under `data/uploads/` and `data/images/`, and its entry in `data/document_metadata.json`. Files in `data/raw_pdfs/` and in the watched folder are never deleted. Merging, relationships and the index are then rebuilt from what is left, so concepts and edges that only came from the deleted document disappear.
+- A delete in the app writes a **tombstone** (`deleted_documents`) so that `pipeline run` and the watcher do not add the same file content back. An explicit upload of the same file removes the tombstone.
+- **Replace** adds the new version first, copies the metadata fields the user edited, then deletes the old version.
+- The **watcher** compares the folder with `watched_files` (path, size, modification time, SHA-256). A changed file is only read after its size and time stayed the same for one scan, so half-copied files are skipped. All changes found in one scan are processed as one job, followed by one run of the knowledge stages.
+
 ## 4. Concept extraction
 
 1. Pages with `quality_status` of `no_text_detected` or `failed` are not read.
@@ -207,11 +238,20 @@ erDiagram
     page_terms }o--o{ search_index : "postings"
     content_units ||--o{ assets : "asset_ids"
     documents ||--o| image_state : "_id = document"
+    documents ||--o{ watched_files : "document_id"
+    documents ||--o| deleted_documents : "_id = document (tombstone)"
 
     documents {
         string id "PDF SHA-256"
         string filename
         int page_count
+        array sources "upload, raw_pdfs, watch"
+    }
+    watched_files {
+        string id "path in watched folder"
+        string sha256
+        int size
+        string document_id
     }
     content_units {
         string id "stable_id"

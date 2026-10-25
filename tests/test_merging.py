@@ -88,3 +88,24 @@ def test_minimum_mentions_and_idempotent_rebuild(store) -> None:
     assert ids_first == ids_second == [stable_id("concept", "design review")]
     assert second["stale_removed"] == 0
     assert store.database["concept_aliases"].find_one({"_id": "designreview"})["concept_id"] == ids_first[0]
+
+
+def test_embedding_merges_need_word_variants(store, tmp_path) -> None:
+    _mention(store, "wireless network node", "u1", label="system component", count=3)
+    _mention(store, "wireless terminal node", "u2", label="system component")
+    _mention(store, "electrical system", "u3", label="system component", count=3)
+    _mention(store, "electric system", "u4", label="system component")
+    _mention(store, "united states department of defense", "u5", label="organization", count=3)
+    _mention(store, "u.s. department of defense", "u6", label="organization")
+    embedder = FakeEmbedder({"wireless terminal node": "wireless network node",
+                             "electric system": "electrical system",
+                             "u.s. department of defense": "united states department of defense"})
+    report = tmp_path / "merge_report.csv"
+    merge_concepts(store, embedder, report)
+    nodes = _names_by_node(store)
+    assert nodes["wireless network node"] == ["wireless network node"]
+    assert nodes["electrical system"] == ["electric system", "electrical system"]
+    assert nodes["united states department of defense"] == ["u.s. department of defense",
+                                                            "united states department of defense"]
+    reasons = {row["name_b"]: row["reason"] for row in csv.DictReader(report.open(encoding="utf-8"))}
+    assert reasons["wireless terminal node"] == "the differing words are not variants of each other"

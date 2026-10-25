@@ -31,11 +31,13 @@
         <strong>Drag and drop PDF files here</strong>
         <span>or click to upload</span>
       </label>
+      <p id="watch-status" class="muted small"></p>
       <div id="upload-message" class="notice" hidden></div>
+      <input id="replace-input" type="file" accept="application/pdf,.pdf" hidden>
       <div class="table-wrap">
         <table class="doc-table">
           <thead>
-            <tr><th>Document</th><th>Pages</th><th>Status</th><th>Title</th><th>Author / Editor</th><th>Year</th><th></th></tr>
+            <tr><th>Document</th><th>Pages</th><th>Status</th><th>Title</th><th>Author / Editor</th><th>Year</th><th>Actions</th></tr>
           </thead>
           <tbody id="doc-rows"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
         </table>
@@ -96,7 +98,13 @@
       <button type="button" id="modal-close" class="icon-button" aria-label="Close">✕</button>
     </div>
     <div class="modal-body">
-      <img id="modal-image" alt="Source page with the quote highlighted">
+      <p id="modal-loading" class="muted" hidden>Loading page…</p>
+      <img id="modal-image" alt="Source page with the quote highlighted" hidden>
+      <div id="modal-fallback" class="modal-fallback" hidden>
+        <p class="not-found">The source page image could not be loaded.</p>
+        <p class="muted small">The citation and the quoted text below are still valid; the page image may be missing because the original PDF file was moved or deleted.</p>
+        <p id="modal-fallback-quote" class="quote"></p>
+      </div>
     </div>
   </div>
 </div>

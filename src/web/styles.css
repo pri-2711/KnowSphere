@@ -18,6 +18,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; }
 h1, h2, h3 { font-family: var(--serif); font-weight: 600; margin: 0; }
 code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
@@ -59,6 +60,9 @@ main { padding: 24px clamp(16px, 3vw, 36px); min-width: 0; }
 .badge.processed, .badge.done { background: var(--ok-soft); color: var(--ok); }
 .badge.running, .badge.queued { background: var(--accent-soft); color: var(--accent); }
 .badge.failed, .badge.incomplete { background: var(--warn-soft); color: var(--warn); }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+button.danger { color: var(--warn); border-color: #e7c2b7; }
+button.danger.confirm { background: var(--warn); border-color: var(--warn); color: #fff; }
 .progress { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin-top: 6px; width: 140px; }
 .progress span { display: block; height: 100%; background: var(--accent); }
 
@@ -114,6 +118,7 @@ mark { background: var(--mark); border-radius: 3px; padding: 0 1px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .modal-body { overflow: auto; padding: 10px; background: var(--surface-2); }
 .modal-body img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.modal-fallback { background: var(--surface); padding: 16px; border-radius: 8px; max-width: 640px; }
 
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }

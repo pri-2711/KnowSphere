@@ -13,3 +13,8 @@ output/
 .pytest_cache/
 data/images/
 data/uploads/
+data/inbox/*
+!data/inbox/.gitkeep
+
+# Logs
+*.log
