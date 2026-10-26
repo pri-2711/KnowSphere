@@ -1,24 +1,39 @@
 {
-  "ed5f1f603eb7fe526bf7a76724605be595d128fde40423d5cb41b4604b339380": {
-    "filename": "book1.pdf",
-    "title": "Systems Engineering - Practice and Theory",
-    "author": "Boris Cogan",
-    "year": "2012",
+  "06ef58d767a91d84ccecbdd263ed369d9d583e93f0509f67c50ad241054b52aa": {
+    "filename": "eclss-technical-brief-ochmo.pdf",
+    "title": "Environmental Control & Life Support System (ECLSS): Human-Centered Approach",
+    "author": "NASA Office of the Chief Health and Medical Officer (OCHMO)",
+    "year": "2023",
     "detected_from": {
-      "title": "title line on PDF page 4",
-      "author": "'Edited by' line on PDF page 1",
-      "year": "copyright/published line on PDF page 4"
+      "title": "PDF metadata title",
+      "author": "PDF metadata author"
     },
-    "user_edited": []
+    "user_edited": [
+      "author",
+      "title",
+      "year"
+    ]
   },
-  "20944d6b39f2d56354104f3ae62dab3f2c8e56d2ac5088d2208df6551e0cd8cb": {
-    "filename": "book2.pdf",
-    "title": "Systems Engineering Fundamentals",
-    "author": "Defense Acquisition University Press",
-    "year": "2001",
+  "bd409dd2e039c00a9ef141c76223ca6625d6481bd071e3ae481051f9014c4715": {
+    "filename": "NASA-STD-3000B_VOL-2.pdf",
+    "title": "MAN-SYSTEMS INTEGRATION STANDARDS",
+    "author": "NASA",
+    "year": "1995",
+    "detected_from": {},
+    "user_edited": [
+      "author",
+      "title",
+      "year"
+    ]
+  },
+  "b9eab584c2bc88b52f6eb6744e321eb72ca58003e8ac77dc1ebeb034aba11d1e": {
+    "filename": "BVAD_2.15.22-final.pdf",
+    "title": "BVAD2-1-2022_For-Signature Smith.pdf",
+    "author": "Michael K. Ewert",
+    "year": "2022",
     "detected_from": {
-      "title": "largest text on PDF page 1",
-      "author": "'Prepared by' line on PDF page 1",
+      "title": "PDF metadata title",
+      "author": "'Editor:' line on PDF page 1",
       "year": "date line on PDF page 1"
     },
     "user_edited": []
