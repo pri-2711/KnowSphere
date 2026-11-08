@@ -23,6 +23,7 @@ from src import pdf_extraction
 from src.config import IMAGE_DIR, UPLOAD_DIR
 from src.ingest.images import Captioner, extract_images
 from src.metadata import MetadataStore, detect_metadata
+from src.projects import DEFAULT_PROJECT, ProjectStore, document_id_for, is_default
 from src.storage.mongodb_store import MongoKnowledgeStore, sha256_file
 
 logger = logging.getLogger("knowledge_map.ingest")
@@ -56,9 +57,10 @@ def is_tombstoned(store: MongoKnowledgeStore, document_id: str) -> bool:
     return store.database[TOMBSTONES].find_one({"_id": document_id}, {"_id": 1}) is not None
 
 
-def stage_upload(source: Path, filename: str, upload_root: Path = UPLOAD_DIR) -> tuple[Path, str]:
-    """Copy a file into its own folder named by hash. Returns (pdf path, document id)."""
-    document_id = sha256_file(source)
+def stage_upload(source: Path, filename: str, upload_root: Path = UPLOAD_DIR,
+                 project_id: str = DEFAULT_PROJECT) -> tuple[Path, str]:
+    """Copy a file into its own folder named by its document ID. Returns (pdf path, document id)."""
+    document_id = document_id_for(project_id, sha256_file(source))
     folder = upload_root / document_id[:16]
     folder.mkdir(parents=True, exist_ok=True)
     safe_name = Path(filename).name or "document.pdf"
@@ -79,10 +81,11 @@ def ingest_pdf(
     captioner: Captioner | None = None,
     progress: Progress = _noop,
     source: str = "upload",
+    project_id: str = DEFAULT_PROJECT,
 ) -> dict[str, Any]:
-    """Extract (only if needed), store pages, detect metadata, and extract images for one PDF."""
-    document_id = sha256_file(pdf_path)
-    result: dict[str, Any] = {"document_id": document_id, "filename": pdf_path.name}
+    """Extract (only if needed), store pages, detect metadata, and extract images for one PDF in one project."""
+    document_id = document_id_for(project_id, sha256_file(pdf_path))
+    result: dict[str, Any] = {"document_id": document_id, "filename": pdf_path.name, "project_id": project_id}
     if is_ingested(store, document_id):
         result["pages"] = "unchanged"
     else:
@@ -92,14 +95,15 @@ def ingest_pdf(
             pdf_extraction.run(pdf_path.parent, extracted_dir)
         progress("storing pages", 0.3)
         result["pages"] = store.ingest_extracted_directory(
-            extracted_dir, pdf_path.parent, only_stems={pdf_path.stem})["content_units"]
+            extracted_dir, pdf_path.parent, only_stems={pdf_path.stem}, project_id=project_id,
+            document_id_for=lambda sha: document_id_for(project_id, sha))["content_units"]
     store.documents.update_one({"_id": document_id}, {"$addToSet": {"sources": source}})
     store.database[TOMBSTONES].delete_one({"_id": document_id})
     if not metadata.get(document_id):
         progress("detecting metadata", 0.35)
         metadata.record_detection(document_id, pdf_path.name, detect_metadata(pdf_path))
     progress("extracting images", 0.4)
-    result["images"] = extract_images(store, document_id, pdf_path, image_root, captioner)
+    result["images"] = extract_images(store, document_id, pdf_path, image_root, captioner, project_id)
     return result
 
 
@@ -162,3 +166,36 @@ def remove_source(
     if document.get("sources"):
         return {"document_id": document_id, "deleted": False, "remaining_sources": document["sources"]}
     return delete_document(store, metadata, document_id, upload_root, image_root, tombstone=False)
+
+
+# Project-level records that are not tied to one document (rebuilt per project by the knowledge stages).
+_PROJECT_DERIVED = ("concepts", "concept_aliases", "relationships", "search_index", "search_meta",
+                    "kg_concepts", "kg_relationships", "deleted_documents", "watched_files", "concept_mentions",
+                    "extraction_state", "page_terms", "content_units", "assets", "image_state")
+
+
+def delete_project(
+    store: MongoKnowledgeStore,
+    metadata: MetadataStore | None,
+    project_id: str,
+    upload_root: Path = UPLOAD_DIR,
+    image_root: Path = IMAGE_DIR,
+) -> dict[str, Any]:
+    """Delete one project: its documents (with their files and derived records) and its graph.
+
+    Only records whose ``project_id`` is exactly this project are touched. The default project
+    cannot be deleted. Files in data/raw_pdfs are never touched.
+    """
+    projects = ProjectStore(store.database)
+    project = projects.get(project_id)
+    if is_default(project_id):
+        projects.remove_record(project_id)   # raises: the default project is protected
+    documents = [document["_id"] for document in store.documents.find({"project_id": project_id}, {"_id": 1})]
+    for document_id in documents:
+        delete_document(store, metadata, document_id, upload_root, image_root, tombstone=False)
+    removed = {name: store.database[name].delete_many({"project_id": project_id}).deleted_count
+               for name in _PROJECT_DERIVED}
+    projects.remove_record(project_id)
+    logger.info("deleted project %s (%s): %d documents, %s", project_id, project["name"], len(documents), removed)
+    return {"project_id": project_id, "name": project["name"], "documents_deleted": len(documents),
+            "records_removed": removed}

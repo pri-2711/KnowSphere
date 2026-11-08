@@ -11,6 +11,9 @@ and macOS and needs no extra dependency. Each scan compares the folder with the
 - a removed PDF removes its source; the document is deleted when no other
   source (an upload, data/raw_pdfs, another watched path) still provides it.
 
+A file in a sub-folder named after a project ID (``data/inbox/<project id>/x.pdf``) belongs to
+that project; every other file belongs to the default project.
+
 A file is only processed after its size and modification time stayed the same
 for one full interval, so a file that is still being copied is not read.
 """
@@ -26,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.ingest.documents import is_tombstoned
+from src.projects import DEFAULT_PROJECT, document_id_for
 from src.storage.mongodb_store import MongoKnowledgeStore, sha256_file
 
 logger = logging.getLogger("knowledge_map.watch")
@@ -42,10 +46,15 @@ class WatchEvent:
     old_document_id: str | None = None
     size: int | None = None
     mtime_ns: int | None = None
+    project_id: str = DEFAULT_PROJECT
 
     @property
     def source(self) -> str:
         return f"watch:{self.relative_path}"
+
+    @property
+    def document_id(self) -> str | None:
+        return document_id_for(self.project_id, self.sha256) if self.sha256 else None
 
 
 class FolderWatcher:
@@ -67,6 +76,13 @@ class FolderWatcher:
                 files[path.relative_to(self.folder).as_posix()] = (path, stat.st_size, stat.st_mtime_ns)
         return files
 
+    def project_for(self, relative_path: str) -> str:
+        """``<project id>/file.pdf`` belongs to that project; anything else to the default project."""
+        parts = relative_path.split("/")
+        if len(parts) > 1 and self.store.database["projects"].find_one({"_id": parts[0]}, {"_id": 1}):
+            return parts[0]
+        return DEFAULT_PROJECT
+
     def scan(self) -> list[WatchEvent]:
         """Compare the folder with the stored state and return stable changes."""
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -87,10 +103,12 @@ class FolderWatcher:
                 self._seen.pop(relative, None)
                 continue
             events.append(WatchEvent("updated" if record else "added", relative, path, digest,
-                                     record.get("document_id") if record else None, size, mtime))
+                                     record.get("document_id") if record else None, size, mtime,
+                                     self.project_for(relative)))
         for relative, record in sorted(known.items()):
             if relative not in current:
-                events.append(WatchEvent("deleted", relative, old_document_id=record.get("document_id")))
+                events.append(WatchEvent("deleted", relative, old_document_id=record.get("document_id"),
+                                         project_id=record.get("project_id") or DEFAULT_PROJECT))
         return events
 
     def mark_done(self, event: WatchEvent) -> None:
@@ -99,33 +117,37 @@ class FolderWatcher:
             self.state.delete_one({"_id": event.relative_path})
             return
         self.state.update_one({"_id": event.relative_path}, {"$set": {
-            "sha256": event.sha256, "document_id": event.sha256, "size": event.size, "mtime_ns": event.mtime_ns,
-            "processed_at": datetime.now(timezone.utc)}}, upsert=True)
+            "sha256": event.sha256, "document_id": event.document_id, "project_id": event.project_id,
+            "size": event.size, "mtime_ns": event.mtime_ns, "processed_at": datetime.now(timezone.utc)}}, upsert=True)
 
 
 def process_events(pipeline: Any, watcher: FolderWatcher, events: list[WatchEvent],
                    progress: Progress = lambda stage, fraction: None) -> list[dict[str, Any]]:
-    """Apply watch events through the pipeline, then run the knowledge stages once."""
+    """Apply watch events through the pipeline, then run the knowledge stages once per affected project."""
     results = []
+    projects: set[str] = set()
     for event in events:
+        projects.add(event.project_id)
         name = Path(event.relative_path).name
         logger.info("watch %s: %s", event.kind, event.relative_path)
-        result: dict[str, Any] = {"event": event.kind, "path": event.relative_path}
-        if event.kind in ("added", "updated") and is_tombstoned(pipeline.store, event.sha256):
+        result: dict[str, Any] = {"event": event.kind, "path": event.relative_path, "project_id": event.project_id}
+        if event.kind in ("added", "updated") and is_tombstoned(pipeline.store, event.document_id):
             result["skipped"] = "this file version was deleted in the app"
         elif event.kind == "added":
-            result.update(pipeline.ingest_file(event.path, name, progress, source_label=event.source))
+            result.update(pipeline.ingest_file(event.path, name, progress, source_label=event.source,
+                                               project_id=event.project_id))
         elif event.kind == "updated":
-            result.update(pipeline.ingest_file(event.path, name, progress, source_label=event.source))
-            if event.old_document_id and event.old_document_id != event.sha256:
-                pipeline.metadata.carry_over_edits(event.old_document_id, event.sha256)
+            result.update(pipeline.ingest_file(event.path, name, progress, source_label=event.source,
+                                               project_id=event.project_id))
+            if event.old_document_id and event.old_document_id != event.document_id:
+                pipeline.metadata.carry_over_edits(event.old_document_id, event.document_id)
                 result["old_version"] = pipeline.remove_source(event.old_document_id, event.source, progress)
         elif event.kind == "deleted" and event.old_document_id:
             result.update(pipeline.remove_source(event.old_document_id, event.source, progress))
         watcher.mark_done(event)
         results.append(result)
-    if events:
-        pipeline.knowledge_stages(progress)
+    for project_id in sorted(projects):
+        pipeline.knowledge_stages(progress, project_id=project_id)
     return results
 
 

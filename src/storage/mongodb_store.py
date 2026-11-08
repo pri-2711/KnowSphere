@@ -14,7 +14,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
@@ -77,7 +77,11 @@ class MongoKnowledgeStore:
 
     def ensure_indexes(self) -> None:
         """Create unique identity and common provenance/relationship indexes."""
-        self.documents.create_index([("source_sha256", ASCENDING)], unique=True, name="uq_document_hash")
+        # One document per PDF hash within a project; the same PDF may be in several projects.
+        if "uq_document_hash" in self.documents.index_information():
+            self.documents.drop_index("uq_document_hash")   # old global rule; the index is rebuilt below, no data changes
+        self.documents.create_index([("project_id", ASCENDING), ("source_sha256", ASCENDING)], unique=True,
+                                    name="uq_project_document_hash")
         self.documents.create_index([("filename", ASCENDING)], name="ix_document_filename")
 
         self.content_units.create_index(
@@ -171,10 +175,14 @@ class MongoKnowledgeStore:
         raw_pdf_dir: Path,
         metadata_path: Path | None = None,
         only_stems: set[str] | None = None,
+        project_id: str = "default",
+        document_id_for: Callable[[str], str] | None = None,
     ) -> dict[str, Any]:
         """Ingest existing ``*.pages.jsonl`` sidecars without reprocessing PDFs.
 
         ``only_stems`` limits ingestion to sidecars of these PDF file stems (default: all).
+        ``project_id`` is stored on every record; ``document_id_for`` turns the PDF hash into the
+        project's document ID (default: the hash itself).
         """
         extracted_dir = extracted_dir.resolve()
         raw_pdf_dir = raw_pdf_dir.resolve()
@@ -211,7 +219,8 @@ class MongoKnowledgeStore:
             sidecar_stem = sidecar.name[:-len(".pages.jsonl")]
             if sidecar_stem.casefold() != Path(filename).stem.casefold():
                 raise ValueError(f"Sidecar {sidecar.name} does not match source filename {filename!r}.")
-            document_id = sha256_file(source_pdf)
+            source_sha256 = sha256_file(source_pdf)
+            document_id = document_id_for(source_sha256) if document_id_for else source_sha256
             extraction_doc_id = records[0].get("document_id")
             if any(record.get("document_id") != extraction_doc_id for record in records):
                 raise ValueError(f"Sidecar {sidecar.name} contains mixed document IDs.")
@@ -221,7 +230,8 @@ class MongoKnowledgeStore:
                 "_id": document_id,
                 "document_id": document_id,
                 "extraction_document_id": extraction_doc_id,
-                "source_sha256": document_id,
+                "source_sha256": source_sha256,
+                "project_id": project_id,
                 "filename": filename,
                 "title": book_meta.get("title"),
                 "page_count": book_meta.get("total_pages") or len(records),
@@ -253,6 +263,7 @@ class MongoKnowledgeStore:
                 asset_ids: list[str] = []
                 for asset_ref in page_record.get("associated_assets", []):
                     asset_record = self._asset_record(asset_ref, page_record, document_id, sidecar)
+                    asset_record["project_id"] = project_id
                     asset_ids.append(asset_record["_id"])
                     summary["assets"]["inserted"] += int(self._upsert(self.assets, asset_record))
                     summary["assets"]["total"] += 1
@@ -261,6 +272,7 @@ class MongoKnowledgeStore:
                 unit_record = {
                     "_id": unit_id,
                     "document_id": document_id,
+                    "project_id": project_id,
                     "source_document_id": extraction_doc_id,
                     "unit_type": "page",
                     "unit_index": page_number,

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from src.storage.mongodb_store import MongoKnowledgeStore, _relative_file_uri, stable_id
+from src.projects import DEFAULT_PROJECT, project_filter
 from src.textutil import concept_key
 
 try:
@@ -124,6 +125,7 @@ def extract_images(
     pdf_path: Path,
     image_root: Path,
     captioner: Captioner | None = None,
+    project_id: str = DEFAULT_PROJECT,
 ) -> dict[str, Any]:
     """Extract qualifying images of one document; skipped when this PDF hash was already processed."""
     if fitz is None:
@@ -172,7 +174,7 @@ def extract_images(
                 uri = _relative_file_uri(path, store.project_root)
                 bbox = [round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1)]
                 store._upsert(store.assets, {
-                    "_id": asset_id, "asset_id": asset_key, "document_id": document_id,
+                    "_id": asset_id, "asset_id": asset_key, "document_id": document_id, "project_id": project_id,
                     "page_number": page_number, "kind": "image", "caption": caption,
                     "bbox": bbox, "width": width, "height": height, "sha256": digest,
                     "storage": {"provider": "local", "uri": uri, "media_type": media_type},
@@ -181,7 +183,7 @@ def extract_images(
                 })
                 store._upsert(store.content_units, {
                     "_id": stable_id("content_unit", document_id, "image", page_number, index),
-                    "document_id": document_id, "unit_type": "image", "unit_index": index,
+                    "document_id": document_id, "project_id": project_id, "unit_type": "image", "unit_index": index,
                     "page_number": page_number,
                     "text": "\n".join(part for part in (caption, context) if part),
                     "caption": caption, "caption_source": "nearby_text" if caption else None,
@@ -193,18 +195,21 @@ def extract_images(
     store.database["image_state"].update_one(
         {"_id": document_id},
         {"$set": {"version": IMAGE_VERSION, "images": summary["images"], "captioned": captioner is not None,
-                  "processed_at": datetime.now(timezone.utc)}},
+                  "processed_at": datetime.now(timezone.utc), "project_id": project_id}},
         upsert=True,
     )
     return summary
 
 
-def link_images_to_concepts(store: MongoKnowledgeStore, max_words: int = 5) -> dict[str, int]:
-    """Attach concept IDs to image units whose caption or context contains a concept name or alias."""
-    aliases = {record["_id"]: record["concept_id"] for record in store.database["concept_aliases"].find()}
+def link_images_to_concepts(store: MongoKnowledgeStore, max_words: int = 5,
+                            project_id: str = DEFAULT_PROJECT) -> dict[str, int]:
+    """Attach concept IDs to a project's image units whose caption or context names one of its concepts."""
+    scope = project_filter(project_id)
+    aliases = {record.get("key", record["_id"]): record["concept_id"]
+               for record in store.database["concept_aliases"].find(scope)}
     images_by_concept: dict[str, list[str]] = defaultdict(list)
     linked = 0
-    for unit in store.content_units.find({"unit_type": "image"}, {"text": 1}):
+    for unit in store.content_units.find({"unit_type": "image", **scope}, {"text": 1}):
         words = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*", unit.get("text") or "")
         found: set[str] = set()
         for size in range(1, max_words + 1):
@@ -216,7 +221,7 @@ def link_images_to_concepts(store: MongoKnowledgeStore, max_words: int = 5) -> d
         for concept_id in found:
             images_by_concept[concept_id].append(unit["_id"])
         linked += bool(found)
-    store.concepts.update_many({}, {"$set": {"image_ids": []}})
+    store.concepts.update_many(scope, {"$set": {"image_ids": []}})
     for concept_id, unit_ids in images_by_concept.items():
         store.concepts.update_one({"_id": concept_id}, {"$set": {"image_ids": sorted(unit_ids)}})
     return {"images_linked": linked, "concepts_with_images": len(images_by_concept)}

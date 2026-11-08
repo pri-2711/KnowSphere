@@ -10,13 +10,23 @@ let cy = null;
 let documentsCache = [];
 let pollTimer = null;
 let replaceTarget = null;
+let projectsCache = [];
+let currentProject = (() => { try { return localStorage.getItem("km-project") || "default"; } catch (e) { return "default"; } })();
+
+// Every project-owned request carries ?project=; these endpoints are not project-scoped.
+const GLOBAL_ENDPOINTS = ["/api/projects", "/api/watch", "/api/jobs", "/api/health"];
+
+function scoped(path) {
+  if (!path.startsWith("/api/") || GLOBAL_ENDPOINTS.some((prefix) => path.startsWith(prefix))) return path;
+  return path + (path.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(currentProject);
+}
 
 function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(scoped(path), options);
   if (!response.ok) {
     let detail = response.statusText;
     try { detail = (await response.json()).detail || detail; } catch (e) { /* not JSON */ }
@@ -301,7 +311,7 @@ function renderConcept(concept) {
   const sources = `<ul class="list">${concept.sources.slice(0, 25).map((source) =>
     `<li>${citationButton(source.citation, source.content_unit_id, source.quote ? source.quote.quote : "")}</li>`).join("")}</ul>`;
   const images = concept.images.length ? `<h3>Images (${concept.images.length})</h3><div class="thumbs">${concept.images.slice(0, 12).map((image) =>
-    `<img src="/api/images/${encodeURIComponent(image.id)}" alt="${escapeHtml(image.caption || "Image")}" title="${escapeHtml((image.caption || "Image") + " " + image.citation)}">`).join("")}</div>` : "";
+    `<img src="${scoped(`/api/images/${encodeURIComponent(image.id)}`)}" alt="${escapeHtml(image.caption || "Image")}" title="${escapeHtml((image.caption || "Image") + " " + image.citation)}">`).join("")}</div>` : "";
   return `<h2>${escapeHtml(concept.name)}</h2>
     <span class="chip type-chip">${escapeHtml(concept.type || "concept")}</span>
     <span class="muted small"> ${concept.mention_count} mentions on ${concept.page_count} pages</span>
@@ -421,7 +431,7 @@ function openPage(unitId, label, quote) {
   // Only show the image once it has really loaded; otherwise show a clear message instead of a broken icon.
   image.onload = () => { $("#modal-loading").hidden = true; image.hidden = false; };
   image.onerror = () => showPageFallback(quote);
-  image.src = `/api/pages/${encodeURIComponent(unitId)}/image?${params}`;
+  image.src = scoped(`/api/pages/${encodeURIComponent(unitId)}/image?${params}`);
 }
 
 document.addEventListener("click", (event) => {
@@ -444,9 +454,115 @@ $("#modal-close").addEventListener("click", () => {
 $("#modal").addEventListener("click", (event) => { if (event.target.id === "modal") $("#modal-close").click(); });
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !$("#modal").hidden) $("#modal-close").click(); });
 
+// ------------------------------------------------------------------- projects
+function projectNotice(message, isError = false) {
+  const box = $("#project-message");
+  box.textContent = message;
+  box.classList.toggle("error-text", isError);
+}
+
+function renderProjects() {
+  const select = $("#project-select");
+  select.innerHTML = projectsCache.map((project) =>
+    `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)} (${project.documents})</option>`).join("");
+  if (!projectsCache.some((project) => project.id === currentProject)) currentProject = "default";
+  select.value = currentProject;
+  const current = projectsCache.find((project) => project.id === currentProject);
+  $("#project-delete").disabled = !current || current.is_default;
+}
+
+async function loadProjects() {
+  try {
+    projectsCache = await api("/api/projects");
+    renderProjects();
+  } catch (e) { projectNotice(`Could not load projects: ${e.message}`, true); }
+}
+
+// Switching project clears everything shown from the previous one and reloads from the server.
+function switchProject(projectId) {
+  currentProject = projectId;
+  try { localStorage.setItem("km-project", projectId); } catch (e) { /* per-browser convenience only */ }
+  renderProjects();
+  if (cy) {
+    cy.elements().remove();
+    $("#filter-type").innerHTML = `<option value="">All types</option>`;
+    $("#filter-document").value = "";
+  }
+  $("#panel").innerHTML = `<p class="muted">Click a concept to see its description, aliases, related concepts and sources.</p>`;
+  $("#answer").innerHTML = "";
+  $("#concept-search").value = "";
+  loadDocuments();
+  loadStats();
+  if (!$("#screen-map").hidden && cy) loadGraph().catch(() => {});
+}
+
+function setupProjects() {
+  const form = $("#project-form");
+  let mode = null;
+  const openForm = (newMode, value) => {
+    mode = newMode;
+    $("#project-name").value = value;
+    form.hidden = false;
+    $("#project-name").focus();
+  };
+  $("#project-select").addEventListener("change", (event) => switchProject(event.target.value));
+  $("#project-new").addEventListener("click", () => openForm("create", ""));
+  $("#project-rename").addEventListener("click", () => {
+    const current = projectsCache.find((project) => project.id === currentProject);
+    openForm("rename", current ? current.name : "");
+  });
+  $("#project-cancel").addEventListener("click", () => { form.hidden = true; });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = $("#project-name").value.trim();
+    if (!name) return;
+    try {
+      const body = JSON.stringify({ name });
+      const headers = { "Content-Type": "application/json" };
+      if (mode === "create") {
+        const project = await api("/api/projects", { method: "POST", headers, body });
+        form.hidden = true;
+        await loadProjects();
+        switchProject(project.id);
+        projectNotice(`Created "${project.name}". Uploads now go to this project.`);
+      } else {
+        await api(`/api/projects/${encodeURIComponent(currentProject)}`, { method: "PUT", headers, body });
+        form.hidden = true;
+        await loadProjects();
+        projectNotice("Project renamed.");
+      }
+    } catch (e) { projectNotice(e.message, true); }
+  });
+  $("#project-delete").addEventListener("click", async (event) => {
+    const button = event.target;
+    if (!button.classList.contains("confirm")) {
+      button.classList.add("confirm");
+      button.textContent = "Confirm delete";
+      setTimeout(() => { button.classList.remove("confirm"); button.textContent = "Delete"; }, 4000);
+      return;
+    }
+    const deleting = currentProject;
+    try {
+      const job = await api(`/api/projects/${encodeURIComponent(deleting)}`, { method: "DELETE" });
+      projectNotice("Deleting the project, its documents and its map...");
+      switchProject("default");
+      const poll = async () => {
+        const state = await api(`/api/jobs/${job.id}`);
+        if (state.status === "done" || state.status === "failed") {
+          projectNotice(state.status === "done" ? "Project deleted." : `Delete failed: ${state.error}`, state.status !== "done");
+          loadProjects();
+        } else setTimeout(poll, 1000);
+      };
+      poll();
+    } catch (e) { projectNotice(e.message, true); }
+  });
+}
+
+setupProjects();
 setupDocuments();
 setupMap();
 setupAsk();
+loadProjects();
 loadDocuments();
 loadStats();
 showScreen(location.hash.slice(1) || "documents");

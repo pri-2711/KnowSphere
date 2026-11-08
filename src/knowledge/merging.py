@@ -29,7 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
-from src.storage.mongodb_store import MongoKnowledgeStore, stable_id
+from src.projects import DEFAULT_PROJECT, project_filter, scoped_id, scoped_key
+from src.storage.mongodb_store import MongoKnowledgeStore
 from src.textutil import concept_key, singularize, stem
 
 MERGE_VERSION = "merge-1"
@@ -94,10 +95,11 @@ class Candidate:
         return {singularize(word) for word in re.findall(r"[a-z0-9]+", self.name.replace("-", " "))}
 
 
-def load_candidates(store: MongoKnowledgeStore, min_mentions: int = MIN_MENTIONS) -> tuple[dict[str, Candidate], int]:
+def load_candidates(store: MongoKnowledgeStore, min_mentions: int = MIN_MENTIONS,
+                    project_id: str = DEFAULT_PROJECT) -> tuple[dict[str, Candidate], int]:
     """Aggregate mention records by normalized name; returns (kept candidates, raw name count)."""
     candidates: dict[str, Candidate] = {}
-    for record in store.database["concept_mentions"].find():
+    for record in store.database["concept_mentions"].find(project_filter(project_id)):
         candidate = candidates.setdefault(record["name"], Candidate(record["name"]))
         candidate.count += record["count"]
         candidate.pages.add(record["content_unit_id"])
@@ -308,6 +310,7 @@ def build_nodes(
     clusters: list[list[str]],
     candidates: Mapping[str, Candidate],
     page_texts: Mapping[str, str],
+    project_id: str = DEFAULT_PROJECT,
 ) -> list[dict[str, Any]]:
     """Turn clusters into concept records with all aliases and all mentions."""
     nodes = []
@@ -340,7 +343,8 @@ def build_nodes(
         aliases = sorted((set(forms) | set(members)) - {display})
         concept_type = sorted(labels.items(), key=lambda item: (-item[1], item[0]))[0][0]
         nodes.append({
-            "_id": stable_id("concept", canonical.name),
+            "_id": scoped_id("concept", project_id, canonical.name),
+            "project_id": project_id,
             "canonical_name": display,
             "normalized_name": canonical.name,
             "aliases": aliases,
@@ -365,8 +369,13 @@ def write_report(log: list[dict[str, Any]], path: Path) -> None:
         writer.writerows(log)
 
 
-def upsert_all(collection: Any, records: Iterable[Mapping[str, Any]]) -> list[str]:
-    """Upsert records by _id and delete records that are no longer produced. Returns removed IDs."""
+def upsert_all(collection: Any, records: Iterable[Mapping[str, Any]],
+               scope: Mapping[str, Any] | None = None) -> list[str]:
+    """Upsert records by _id and delete records that are no longer produced. Returns removed IDs.
+
+    ``scope`` limits the stale-record deletion to one project (see ``projects.project_filter``);
+    records outside it are never touched.
+    """
     now = datetime.now(timezone.utc)
     keep = set()
     for record in records:
@@ -375,7 +384,7 @@ def upsert_all(collection: Any, records: Iterable[Mapping[str, Any]]) -> list[st
         keep.add(record_id)
         collection.update_one({"_id": record_id}, {"$set": payload, "$setOnInsert": {"created_at": now}},
                               upsert=True)
-    stale = [item["_id"] for item in collection.find({}, {"_id": 1}) if item["_id"] not in keep]
+    stale = [item["_id"] for item in collection.find(dict(scope or {}), {"_id": 1}) if item["_id"] not in keep]
     if stale:
         collection.delete_many({"_id": {"$in": stale}})
     return stale
@@ -386,17 +395,19 @@ def merge_concepts(
     embedder: Embedder | None,
     report_path: Path | None = None,
     min_mentions: int = MIN_MENTIONS,
+    project_id: str = DEFAULT_PROJECT,
 ) -> dict[str, Any]:
-    """Rebuild the ``concepts`` and ``concept_aliases`` collections from mentions."""
+    """Rebuild one project's records in ``concepts`` and ``concept_aliases`` from its mentions."""
     started = time.perf_counter()
-    candidates, raw_names = load_candidates(store, min_mentions)
+    scope = project_filter(project_id)
+    candidates, raw_names = load_candidates(store, min_mentions, project_id)
     clusters, log = cluster_candidates(candidates, embedder)
     unit_ids = {record["content_unit_id"] for candidate in candidates.values() for record in candidate.mentions}
     page_texts = {unit["_id"]: unit.get("text") or "" for unit in
                   store.content_units.find({"_id": {"$in": sorted(unit_ids)}}, {"text": 1})}
-    nodes = build_nodes(clusters, candidates, page_texts)
+    nodes = build_nodes(clusters, candidates, page_texts, project_id)
 
-    stale = upsert_all(store.concepts, nodes)
+    stale = upsert_all(store.concepts, nodes, scope)
 
     aliases: dict[str, tuple[int, str, str]] = {}
     for node in nodes:
@@ -405,8 +416,9 @@ def merge_concepts(
             if key and (key not in aliases or aliases[key][0] < node["mention_count"]):
                 aliases[key] = (node["mention_count"], node["_id"], alias)
     alias_collection = store.database["concept_aliases"]
-    upsert_all(alias_collection, [{"_id": key, "concept_id": concept_id, "alias": alias}
-                                  for key, (_, concept_id, alias) in sorted(aliases.items())])
+    upsert_all(alias_collection, [{"_id": scoped_key(project_id, key), "key": key, "concept_id": concept_id,
+                                   "alias": alias, "project_id": project_id}
+                                  for key, (_, concept_id, alias) in sorted(aliases.items())], scope)
     alias_collection.create_index([("concept_id", 1)], name="ix_alias_concept")
 
     if report_path is not None:

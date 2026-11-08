@@ -37,5 +37,16 @@
       "year": "date line on PDF page 1"
     },
     "user_edited": []
+  },
+  "1fee2be7630c74e4c82d5dba83039434b57fe4ebee1114f24cd3246566a1cb7b": {
+    "filename": "ICES-2023-74.pdf",
+    "title": "V-HAB Atmosphere Modeling and Simulation for a Crewed Polar Sortie",
+    "author": null,
+    "year": "2023",
+    "detected_from": {
+      "title": "largest text on PDF page 1",
+      "year": "copyright/published line on PDF page 1"
+    },
+    "user_edited": []
   }
 }

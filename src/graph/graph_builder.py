@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping
 
 import networkx as nx
 
+from src.projects import DEFAULT_PROJECT, project_filter
 from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment
 
 
@@ -98,9 +99,11 @@ def analyze(graph: nx.Graph, seed: int = 42) -> nx.Graph:
     return graph
 
 
-def load_graph(store: MongoKnowledgeStore) -> nx.Graph:
-    concepts = store.concepts.find({}, {"mentions": 0})
-    relationships = store.database["relationships"].find()
+def load_graph(store: MongoKnowledgeStore, project_id: str = DEFAULT_PROJECT) -> nx.Graph:
+    """One project's graph. Edges whose ends are not both in the project are dropped by build_graph."""
+    scope = project_filter(project_id)
+    concepts = store.concepts.find(scope, {"mentions": 0})
+    relationships = store.database["relationships"].find(scope)
     return analyze(build_graph(concepts, relationships))
 
 
@@ -118,11 +121,12 @@ def graph_stats(graph: nx.Graph, top: int = 10) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Load the knowledge graph from MongoDB and print statistics.")
     parser.add_argument("--top", type=int, default=10, help="How many top connected concepts to list")
+    parser.add_argument("--project", default=DEFAULT_PROJECT, help="Project ID (default: default)")
     args = parser.parse_args(argv)
     client = None
     try:
         client, database = connect_from_environment()
-        print(json.dumps(graph_stats(load_graph(MongoKnowledgeStore(database)), args.top), indent=2))
+        print(json.dumps(graph_stats(load_graph(MongoKnowledgeStore(database), args.project), args.top), indent=2))
         return 0
     except Exception as exc:
         print(f"Graph build failed: {type(exc).__name__}: {exc}", file=sys.stderr)

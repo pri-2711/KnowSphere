@@ -6,10 +6,13 @@ Knowledge Map turns PDF books into a knowledge map you can explore and question.
 [Document Title | Author/Editor | Year of Publication, p. N]
 ```
 
-Answers are extractive. The system never writes its own text and calls no external LLM. If the documents do not contain enough evidence, the answer is exactly: `Not found in the uploaded documents.`
+Answers are extractive. The web app never writes its own text and calls no LLM. If the documents do not contain enough evidence, the answer is exactly: `Not found in the uploaded documents.`
+
+A separate, optional **concept-first pipeline** (`python -m src.kg.orchestrator`) uses Claude to extract concepts and stated relationships from semantic chunks. It runs only when you start it, needs an API key, and writes to its own collections (`kg_concepts`, `kg_relationships`). Every item it stores is checked against a verbatim quote from the source.
 
 ## Features
 
+- **Projects**: independent workspaces. Each project has its own documents, concepts, relationships, map, search and answers; nothing is shared or connected between projects. Create, switch, rename and delete projects in the sidebar.
 - **Add, edit, delete documents**: upload a PDF, replace it with a new version, edit its citation metadata, or delete it with everything derived from it. Concepts, relationships and the index are rebuilt after every change.
 - **Watched folder**: PDFs added to, changed in or removed from `data/inbox/` go through the whole pipeline automatically while the app (or `python -m src.pipeline watch`) runs.
 - **Ingestion**: PDF upload from the web app or the command line. Page text comes from PyMuPDF, with Tesseract OCR for scanned pages. Embedded images are saved with page, bounding box, nearby caption and surrounding text. Optional image captioning (ViT-GPT2) is off by default and is stored apart from the source text.
@@ -19,6 +22,7 @@ Answers are extractive. The system never writes its own text and calls no extern
 - **Relationships**: edges come from co-occurrence in a sentence or a page window, scored with NPMI. The type is `related_to` unless a clear phrase supports `is_a`, `part_of`, `used_for` or `causes`. Every edge stores verbatim evidence quotes.
 - **Graph**: built in memory with NetworkX, with degree, PageRank importance and Louvain communities.
 - **Search and Ask**: BM25 over a persistent inverted index, with concept-name boosting and prefix autocomplete. `/ask` returns verbatim sentences grouped by source. A validator checks each quote against the stored page before it is returned.
+- **Concept-first graph (optional, LLM)**: semantic chunking, Pass 1 concept and relationship extraction per chunk with Claude, Pass 2 cross-document merging, validation, recovery of malformed answers, and storage with full provenance. See "Concept-first knowledge graph" below.
 - **Obsidian export**: one note per concept and one index note per document.
 - **Web app** at `http://localhost:8000` with three screens: Documents, Knowledge Map, Ask.
 
@@ -31,6 +35,7 @@ Answers are extractive. The system never writes its own text and calls no extern
 | OCR fallback | Tesseract via pytesseract | Runs only on pages without a usable text layer. |
 | Storage (source of truth) | MongoDB Community Server, PyMongo | One local server already in use; no extra database for graphs or vectors. |
 | Concept extraction | GLiNER `urchade/gliner_medium-v2.1` (PyTorch, CPU) | A small BERT-family model that runs locally; no API calls. |
+| Concept-first extraction (optional) | Claude via the official `anthropic` SDK, JSON-schema structured output | Called only by `src.kg.orchestrator`; nothing else needs an API key. |
 | Concept merging | fastembed `BAAI/bge-small-en-v1.5` (ONNX), rapidfuzz | A small ONNX model, used only during merging; not at query time. |
 | Keyword search | Own BM25 code, Snowball stemmer (`snowballstemmer`) | Pure Python dictionaries; no search server or vector store. |
 | Graph | NetworkX (PageRank computed with NumPy) | In-memory graph built from MongoDB; no Neo4j. |
@@ -115,6 +120,17 @@ python -m src.pipeline export
 
 `python -m src.pipeline run` is safe to repeat. Unchanged documents and pages are skipped by their SHA-256 hash, so a second run only redoes the fast stages (merging, relationships, index).
 
+## Projects
+
+Every document belongs to exactly one project, and everything derived from it (pages, images, concept mentions, concepts, relationships, index entries, the concept-first graph) belongs to the same project. The project selector in the sidebar decides which project the Documents, Knowledge Map and Ask screens show, and where uploads go.
+
+- **Isolation is enforced by the server, not only the page.** Every API request names its project (`?project=ID`; default `default`). Every query is filtered by project. Concept, page, image and document lookups return 404 for another project's records. Merging, relationships, image links and the keyword index are rebuilt per project and only replace that project's records.
+- **The same name or PDF in two projects never becomes one record.** Concept, alias, index-term and document IDs include the project, so identical concepts in two projects stay two separate nodes and are never merged or connected. The same PDF can be added to several projects.
+- **Existing data** belongs to the project `default` ("Default project"). On first start the app adds `project_id: "default"` to records that have none; nothing is deleted or overwritten, and default-project IDs are unchanged. The default project can be renamed but not deleted.
+- **Deleting a project** removes its documents (with their copies in `data/uploads/` and images in `data/images/`) and its whole graph. Other projects are not touched. Files in `data/raw_pdfs/` are never deleted.
+- **Command line:** add `--project ID` to any pipeline command, for example `python -m src.pipeline --project 3f2a9c1b7d4e ingest notes.pdf`. List or create projects with `python -m src.pipeline projects [--create NAME]`. `python -m src.pipeline run` (the books in `data/raw_pdfs`) always uses the default project. `python -m src.kg.orchestrator` and `python -m src.graph.graph_builder` also take `--project`.
+- **Watched folder:** a PDF in `data/inbox/<project id>/` goes to that project; a PDF directly in `data/inbox/` goes to the default project.
+
 ## Adding, changing and deleting documents
 
 | What you want | In the web app (Documents screen) | Watched folder `data/inbox/` | Command line |
@@ -133,6 +149,40 @@ What happens:
 
 Each change runs as one background job. Jobs run one at a time, and the Documents screen shows their progress.
 
+## Concept-first knowledge graph (optional, uses Claude)
+
+```
+Document -> semantic segmentation -> Pass 1: local extraction (Claude) -> validation / recovery
+         -> Pass 2: cross-document enrichment -> graph validation -> MongoDB (kg_concepts, kg_relationships)
+```
+
+**Setup.** Put your key in `.env` (gitignored): `ANTHROPIC_API_KEY=...`. Optional settings, also in `.env`: `KM_LLM_MODEL` (default `claude-opus-5-5`), `KM_LLM_EFFORT` (default `medium`), `KM_LLM_MAX_RETRIES` (default 2), `KM_LLM_FALLBACKS=0` to turn off the server-side refusal fallback, `KM_CHUNK_MIN_CHARS` / `KM_CHUNK_TARGET_CHARS` / `KM_CHUNK_MAX_CHARS` / `KM_CHUNK_COHESION` for chunking, `KM_KG_EMBEDDINGS=0` to merge without embeddings.
+
+**Run on one document** (filename, document ID or ID prefix):
+
+```bash
+python -m src.kg.orchestrator --document ICES-2023-74.pdf
+python -m src.kg.orchestrator --document ICES-2023-74.pdf --limit-chunks 5   # small trial first
+python -m src.kg.orchestrator --all
+python -m src.kg.orchestrator --rebuild-only                               # Pass 2 + validation + save, no LLM
+```
+
+Each run sends the document's text chunks to the Claude API, which costs money per token and shares that text with Anthropic. Start with `--limit-chunks` to check cost and quality. Chunk counts on the current four documents: ICES-2023-74 33, eclss-technical-brief 54, BVAD 777, NASA-STD-3000B 607.
+
+**What each step does**
+
+| Step | Module | What it does |
+|---|---|---|
+| Segmentation | `src/kg/segmentation.py` | Splits stored page text into chunks at paragraphs and headings, closes a chunk at a size limit or when word overlap with the next paragraph drops (topic shift), keeps section titles, skips running page headers, marks table-of-contents pages, never drops text. |
+| Pass 1 | `src/kg/extraction.py`, `prompts.py`, `llm.py` | Asks Claude for concepts (name, type, description, aliases, evidence quote) and relationships from a fixed vocabulary (`is_a`, `includes`, `uses`, `defines`, `prerequisite_for`, `example_of`, `related_to`), as JSON following `schema.py`. |
+| Validation | `src/kg/validation.py` | Marks every item `supported`, `needs_review` or `rejected`: schema, vocabulary, endpoints, quotes found in the passage, names inside quotes, duplicates, self-loops; after Pass 2, endpoints and source chunks exist. Rejected items never reach the graph. |
+| Recovery | `src/kg/recovery.py` | Fixes harmless syntax (code fences, trailing commas), otherwise sends the error back to Claude for that chunk only, at most `KM_LLM_MAX_RETRIES` times. Every raw answer and error is stored on the chunk. A chunk that still fails is marked for review and retried on the next run; nothing is invented. |
+| Pass 2 | `src/kg/enrichment.py` | Merges the same concept across chunks and documents (same normalized name, stated aliases, spelling variants, name embeddings) with the same conservative guards as the GLiNER merge; an alias claimed for two concepts merges nothing. Relationships are only re-pointed and combined, never created. |
+| Storage | `src/kg/store.py` | Chunks in `content_units` (`unit_type: "chunk"`), graph in `kg_concepts` and `kg_relationships`, stable IDs, upserts; see `docs/mongodb_storage.md`. |
+| Orchestration | `src/kg/orchestrator.py` | Runs the steps and prints a summary (chunks, concepts extracted and merged, relationships, validation counts, recovery attempts and failures). Merge decisions go to `output/reports/kg_merge_report.json`. |
+
+Re-running is safe: unchanged chunks reuse their stored result (same text, prompt version and model), so a second run makes no LLM calls and creates no duplicates. When a document is added, replaced or deleted in the app, the concept-first graph is rebuilt from the stored results without LLM calls; extracting new text needs the command above.
+
 ## CLI reference
 
 | Command | What it does |
@@ -142,6 +192,7 @@ Each change runs as one background job. Jobs run one at a time, and the Document
 | `python -m src.pipeline watch [--folder DIR] [--interval S]` | Watches a folder (default `data/inbox/`) without the web app and processes added, changed and removed PDFs. |
 | `python -m src.pipeline documents` | Lists documents with ID, pages and sources. |
 | `python -m src.pipeline delete ID_OR_FILENAME [...]` | Deletes documents (ID, ID prefix or filename), then rebuilds. |
+| `python -m src.kg.orchestrator --document NAME` | Concept-first pipeline for one document (see above). Also `--all`, `--limit-chunks N`, `--rebuild-only`. |
 | `python -m src.envcheck` | Checks the interpreter and package versions against `requirements.txt`. |
 | `python -m src.pipeline concepts` | Concept mention extraction only (resumable, progress bar). |
 | `python -m src.pipeline merge` | Rebuilds concept nodes and aliases, writes `output/reports/merge_report.csv`, links images to concepts. |
@@ -163,7 +214,8 @@ Logs are written to `output/logs/pipeline.log`.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/health`, `GET /api/stats` | Server and database status, counts. |
+| `GET /api/projects`, `POST /api/projects`, `PUT /api/projects/{id}`, `DELETE /api/projects/{id}` | List, create, rename and delete projects (delete runs as a background job; the default project cannot be deleted). |
+| `GET /api/health`, `GET /api/stats` | Server and database status, counts. All endpoints below take `?project=ID` (default `default`). |
 | `POST /api/documents/upload` | Upload a PDF; processing runs as a background job. |
 | `PUT /api/documents/{id}/file` | Replace a document with a new version of its PDF (background job). |
 | `DELETE /api/documents/{id}` | Delete a document and everything derived from it (background job). |
@@ -194,13 +246,15 @@ src/pdf_extraction.py       PyMuPDF + Tesseract page extraction (unchanged)
 src/storage/                MongoDB store and ingestion (unchanged behaviour)
 src/ingest/                 add/replace/delete documents, folder watcher, image extraction
 src/envcheck.py             interpreter and package version check
-src/knowledge/              concept extraction, merging, relationships
+src/knowledge/              concept extraction, merging, relationships (GLiNER)
+src/kg/                     concept-first pipeline: segmentation, LLM extraction, validation, recovery, enrichment
 src/search/                 inverted index, BM25, extractive answers, citation validator
 src/graph/                  NetworkX graph builder
 src/export/                 Obsidian exporter
 src/api/                    FastAPI app
 src/web/                    HTML, CSS, JavaScript, vendored Cytoscape.js
 src/metadata.py             metadata detection and citation format
+src/projects.py             projects: records, project-scoped IDs and filters, migration
 src/textutil.py             tokenizer, stemmer, sentence spans, name keys
 src/pipeline.py             command line pipeline
 tests/                      pytest suite (mongomock, mocked models)
@@ -221,3 +275,5 @@ tests/                      pytest suite (mongomock, mocked models)
 - The folder watcher polls; changes are picked up within about two scan intervals (10 seconds by default), not instantly.
 - On two-column pages the original extraction (PyMuPDF `sort=True`) can interleave the columns, so some quoted sentences mix text from both columns. Quotes are still verbatim and correctly cited.
 - There is no user authentication. The app is meant to run on your own machine.
+- The concept-first pipeline has only been tested with a mocked LLM so far. It has not run against the Claude API, so its extraction quality and real cost per chunk are not measured yet.
+- Concept-first descriptions are written by the LLM (stored with `generated: true` and the quote they came from); the web app does not show the concept-first graph yet, it still shows the GLiNER graph.

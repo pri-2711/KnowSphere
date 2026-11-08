@@ -22,10 +22,14 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.config import METADATA_FILE, PROJECT_ROOT, WATCH_DIR, WATCH_ENABLED, WATCH_INTERVAL, WEB_DIR
+from src.config import (IMAGE_DIR, METADATA_FILE, PROJECT_ROOT, UPLOAD_DIR, WATCH_DIR, WATCH_ENABLED,
+                        WATCH_INTERVAL, WEB_DIR)
+from src.ingest.documents import delete_project
 from src.envcheck import warn_if_needed
 from src.ingest.watcher import FolderWatcher, WatchService, process_events
 from src.metadata import MetadataStore
+from src.projects import (DEFAULT_PROJECT, ProjectError, ProjectStore, document_id_for, migrate,
+                          project_filter)
 from src.search.engine import KnowledgeService
 from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment, sha256_file
 from src.textutil import collapse_whitespace
@@ -44,6 +48,10 @@ class MetadataUpdate(BaseModel):
     year: str | None = None
 
 
+class ProjectBody(BaseModel):
+    name: str
+
+
 class AskRequest(BaseModel):
     question: str
 
@@ -57,9 +65,10 @@ class JobManager:
         self._lock = threading.Lock()
 
     def submit(self, filename: str, document_id: str | None, work: Callable[[Callable[[str, float], None]], Any],
-               kind: str = "upload") -> dict:
+               kind: str = "upload", project_id: str | None = DEFAULT_PROJECT) -> dict:
         job_id = uuid.uuid4().hex[:12]
-        job = {"id": job_id, "kind": kind, "filename": filename, "document_id": document_id, "status": "queued",
+        job = {"id": job_id, "kind": kind, "project_id": project_id, "filename": filename,
+               "document_id": document_id, "status": "queued",
                "stage": "queued", "progress": 0.0, "error": None, "created_at": time.time()}
         with self._lock:
             self.jobs[job_id] = job
@@ -116,7 +125,10 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
         else:
             state["store"] = store
         state["metadata"] = metadata or MetadataStore(METADATA_FILE)
-        state["service"] = KnowledgeService(state["store"], state["metadata"])
+        migrate(state["store"].database)                 # adds project_id "default" where missing; deletes nothing
+        state["projects"] = ProjectStore(state["store"].database)
+        state["services"] = {}                           # one KnowledgeService per project, loaded on first use
+        state["services_lock"] = threading.Lock()
         state["jobs"] = JobManager()
         state["pipeline"] = None
         state["watch"] = None
@@ -141,8 +153,26 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
             response.headers["Cache-Control"] = "no-cache"
         return response
 
-    def service() -> KnowledgeService:
-        return state["service"]
+    def service(project: str = DEFAULT_PROJECT) -> KnowledgeService:
+        """The project's in-memory service; it only ever holds that project's records."""
+        with state["services_lock"]:
+            cached = state["services"].get(project)
+            if cached is None:
+                cached = KnowledgeService(state["store"], state["metadata"], project)
+                state["services"][project] = cached
+            return cached
+
+    def reload(project: str) -> None:
+        with state["services_lock"]:
+            state["services"].pop(project, None)
+        service(project)
+
+    def check_project(project: str) -> str:
+        try:
+            state["projects"].get(project)
+        except ProjectError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return project
 
     def get_pipeline() -> Any:
         if state["pipeline"] is None:
@@ -160,27 +190,29 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
             try:
                 process_events(get_pipeline(), watch.watcher, events, progress)
                 progress("refreshing caches", 0.99)
-                service().load()
+                for project in {event.project_id for event in events}:
+                    reload(project)
             finally:
                 watch.busy.clear()
 
         label = ", ".join(f"{event.kind} {event.relative_path}" for event in events)
-        return state["jobs"].submit(f"watched folder: {label}"[:200], None, work, kind="watch")
+        return state["jobs"].submit(f"watched folder: {label}"[:200], None, work, kind="watch", project_id=None)
 
     def run_job(kind: str, filename: str, document_id: str | None,
-                action: Callable[[Any, Callable[[str, float], None]], Any], temp_dir: Path | None = None) -> dict:
-        """Queue a document change followed by every knowledge stage and a cache reload."""
+                action: Callable[[Any, Callable[[str, float], None]], Any], project: str,
+                temp_dir: Path | None = None) -> dict:
+        """Queue a document change followed by the project's knowledge stages and a cache reload."""
         def work(progress: Callable[[str, float], None]) -> None:
             try:
                 pipeline = get_pipeline()
                 action(pipeline, progress)
-                pipeline.knowledge_stages(progress)
+                pipeline.knowledge_stages(progress, project_id=project)
                 progress("refreshing caches", 0.99)
-                service().load()
+                reload(project)
             finally:
                 if temp_dir is not None:
                     shutil.rmtree(temp_dir, ignore_errors=True)
-        return state["jobs"].submit(filename, document_id, work, kind=kind)
+        return state["jobs"].submit(filename, document_id, work, kind=kind, project_id=project)
 
     async def save_upload(file: UploadFile) -> tuple[Path, Path, str, str]:
         """Store an uploaded PDF in a temporary folder; returns (folder, path, filename, document id)."""
@@ -197,10 +229,11 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
                 raise HTTPException(400, "The file is not a PDF")
         return temp_dir, temp_path, filename, sha256_file(temp_path)
 
-    def require_document(document_id: str) -> dict[str, Any]:
-        document = state["store"].documents.find_one({"_id": document_id}, {"filename": 1})
+    def require_document(document_id: str, project: str) -> dict[str, Any]:
+        """The document, only if it belongs to this project."""
+        document = state["store"].documents.find_one({"_id": document_id, **project_filter(project)}, {"filename": 1})
         if document is None:
-            raise HTTPException(404, "Unknown document")
+            raise HTTPException(404, "Unknown document in this project")
         return document
 
     @app.get("/", include_in_schema=False)
@@ -216,16 +249,61 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
             mongo = f"error: {exc}"
         return {"status": "ok", "mongodb": mongo, "cache_loaded_at": service().loaded_at}
 
+    # ------------------------------------------------------------------ projects
+    @app.get("/api/projects")
+    def projects() -> list[dict[str, Any]]:
+        store_ = state["store"]
+        return [{"id": project["_id"], "name": project["name"], "is_default": project["_id"] == DEFAULT_PROJECT,
+                 "documents": store_.documents.count_documents(project_filter(project["_id"])),
+                 "concepts": store_.concepts.count_documents(project_filter(project["_id"]))}
+                for project in state["projects"].list()]
+
+    @app.post("/api/projects")
+    def create_project(body: ProjectBody) -> dict[str, Any]:
+        try:
+            project = state["projects"].create(body.name)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"id": project["_id"], "name": project["name"], "is_default": False, "documents": 0, "concepts": 0}
+
+    @app.put("/api/projects/{project_id}")
+    def rename_project(project_id: str, body: ProjectBody) -> dict[str, Any]:
+        check_project(project_id)
+        try:
+            project = state["projects"].rename(project_id, body.name)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"id": project["_id"], "name": project["name"]}
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project_endpoint(project_id: str) -> dict[str, Any]:
+        """Delete a project with all its documents and graph (background job). Other projects are untouched."""
+        project = state["projects"].get(check_project(project_id))
+        if project_id == DEFAULT_PROJECT:
+            raise HTTPException(400, "The default project cannot be deleted")
+
+        def work(progress: Callable[[str, float], None]) -> None:
+            progress("deleting project", 0.2)
+            pipeline = get_pipeline()
+            delete_project(state["store"], state["metadata"], project_id,
+                           getattr(pipeline, "upload_dir", UPLOAD_DIR), getattr(pipeline, "image_dir", IMAGE_DIR))
+            with state["services_lock"]:
+                state["services"].pop(project_id, None)
+
+        return state["jobs"].submit(project["name"], None, work, kind="project_delete", project_id=project_id)
+
+    # ------------------------------------------------------------------ documents
     @app.get("/api/stats")
-    def stats() -> dict[str, Any]:
-        return service().stats()
+    def stats(project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return service(check_project(project)).stats()
 
     @app.get("/api/documents")
-    def documents() -> list[dict[str, Any]]:
+    def documents(project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        check_project(project)
         store_ = state["store"]
         rows = []
         known = set()
-        for document in store_.documents.find({}, {"filename": 1, "page_count": 1, "sources": 1}):
+        for document in store_.documents.find(project_filter(project), {"filename": 1, "page_count": 1, "sources": 1}):
             known.add(document["_id"])
             meta = state["metadata"].get(document["_id"])
             pages = store_.content_units.count_documents({"document_id": document["_id"], "unit_type": "page"})
@@ -244,7 +322,8 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
             })
         for job in state["jobs"].jobs.values():
             # Uploads that are still being processed are shown before their document exists.
-            if job["kind"] == "upload" and job["document_id"] not in known and job["status"] != "done":
+            if job["kind"] == "upload" and job.get("project_id") == project and job["document_id"] not in known \
+                    and job["status"] != "done":
                 rows.append({"id": job["document_id"], "filename": job["filename"], "pages": 0, "images": 0,
                              "concepts": 0, "title": None, "author": None, "year": None, "detected_from": {},
                              "user_edited": [], "sources": [], "status": job["status"], "stage": job["stage"],
@@ -252,34 +331,37 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
         return rows
 
     @app.put("/api/documents/{document_id}/metadata")
-    def update_metadata(document_id: str, body: MetadataUpdate) -> dict[str, Any]:
-        if state["store"].documents.find_one({"_id": document_id}, {"_id": 1}) is None:
-            raise HTTPException(404, "Unknown document")
+    def update_metadata(document_id: str, body: MetadataUpdate, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        require_document(document_id, check_project(project))
         changes = {key: value for key, value in body.model_dump().items() if value is not None}
         return state["metadata"].update(document_id, changes)
 
     @app.post("/api/documents/upload")
-    async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
-        """Add a document."""
-        temp_dir, temp_path, filename, document_id = await save_upload(file)
-        return run_job("upload", filename, document_id,
-                       lambda pipeline, progress: pipeline.ingest_file(temp_path, filename, progress), temp_dir)
+    async def upload(file: UploadFile = File(...), project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        """Add a document to the project."""
+        check_project(project)
+        temp_dir, temp_path, filename, sha = await save_upload(file)
+        return run_job("upload", filename, document_id_for(project, sha),
+                       lambda pipeline, progress: pipeline.ingest_file(temp_path, filename, progress,
+                                                                       project_id=project),
+                       project, temp_dir)
 
     @app.put("/api/documents/{document_id}/file")
-    async def replace_file(document_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-        """Edit a document by uploading a new version of its PDF; metadata edits carry over."""
-        require_document(document_id)
+    async def replace_file(document_id: str, file: UploadFile = File(...),
+                           project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        """Edit a document by uploading a new version of its PDF; it stays in its project, metadata edits carry over."""
+        require_document(document_id, check_project(project))
         temp_dir, temp_path, filename, _ = await save_upload(file)
         return run_job("replace", filename, document_id,
                        lambda pipeline, progress: pipeline.replace(document_id, temp_path, filename, progress),
-                       temp_dir)
+                       project, temp_dir)
 
     @app.delete("/api/documents/{document_id}")
-    def delete_document(document_id: str) -> dict[str, Any]:
-        """Delete a document and everything derived from it, then rebuild concepts, edges and index."""
-        document = require_document(document_id)
+    def delete_document(document_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        """Delete a document and everything derived from it, then rebuild that project's concepts, edges and index."""
+        document = require_document(document_id, check_project(project))
         return run_job("delete", document["filename"], document_id,
-                       lambda pipeline, progress: pipeline.delete(document_id, progress))
+                       lambda pipeline, progress: pipeline.delete(document_id, progress), project)
 
     @app.get("/api/watch")
     def watch_status() -> dict[str, Any]:
@@ -297,19 +379,22 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
         return state["jobs"].jobs[job_id]
 
     @app.get("/api/concepts/autocomplete")
-    def autocomplete(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50)) -> list[dict[str, Any]]:
-        return service().autocomplete(q, limit)
+    def autocomplete(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50),
+                     project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return service(check_project(project)).autocomplete(q, limit)
 
     @app.get("/api/concepts/search")
-    def concept_search(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=100)) -> list[dict]:
-        found = [service().concept_summary(concept_id) for concept_id in service().match_concepts(q)]
+    def concept_search(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=100),
+                       project: str = Query(DEFAULT_PROJECT)) -> list[dict]:
+        svc = service(check_project(project))
+        found = [svc.concept_summary(concept_id) for concept_id in svc.match_concepts(q)]
         ids = {item["id"] for item in found}
-        found += [item for item in service().autocomplete(q, limit) if item["id"] not in ids]
+        found += [item for item in svc.autocomplete(q, limit) if item["id"] not in ids]
         return found[:limit]
 
     @app.get("/api/concepts/{concept_id}")
-    def concept(concept_id: str) -> dict[str, Any]:
-        detail = service().concept_detail(concept_id)
+    def concept(concept_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        detail = service(check_project(project)).concept_detail(concept_id)   # None for other projects' concepts
         if detail is None:
             raise HTTPException(404, "Unknown concept")
         return detail
@@ -317,31 +402,35 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
     @app.get("/api/graph")
     def graph(document_id: str | None = None, type: str | None = None,
               min_weight: float = Query(0.0, ge=0), limit: int = Query(250, ge=1, le=3000),
-              focus: str | None = None) -> dict[str, Any]:
-        return service().graph_payload(document_id or None, type or None, min_weight, limit, focus)
+              focus: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return service(check_project(project)).graph_payload(document_id or None, type or None, min_weight, limit,
+                                                             focus)
 
     @app.get("/api/search")
     def search(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50),
-               document_id: str | None = None) -> dict[str, Any]:
-        return service().search(q, limit, document_id or None)
+               document_id: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return service(check_project(project)).search(q, limit, document_id or None)
 
     @app.post("/api/ask")
-    def ask(body: AskRequest) -> dict[str, Any]:
+    def ask(body: AskRequest, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        check_project(project)
         question = body.question.strip()
         if not question:
             raise HTTPException(400, "Question is empty")
-        return service().ask(question)
+        return service(project).ask(question)
 
     @app.get("/api/pages/{unit_id}")
-    def page(unit_id: str) -> dict[str, Any]:
-        record = service().pages.get(unit_id)
+    def page(unit_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        svc = service(check_project(project))
+        record = svc.pages.get(unit_id)          # only this project's pages are loaded
         if record is None:
             raise HTTPException(404, "Unknown page")
-        return {"id": unit_id, **record, "citation": service().citation(record["document_id"], record["page_number"])}
+        return {"id": unit_id, **record, "citation": svc.citation(record["document_id"], record["page_number"])}
 
     @app.get("/api/pages/{unit_id}/image")
-    def page_image(unit_id: str, quote: str | None = None, zoom: float = Query(1.6, ge=0.5, le=4.0)) -> Response:
-        record = service().pages.get(unit_id)
+    def page_image(unit_id: str, quote: str | None = None, zoom: float = Query(1.6, ge=0.5, le=4.0),
+                   project: str = Query(DEFAULT_PROJECT)) -> Response:
+        record = service(check_project(project)).pages.get(unit_id)
         if record is None or fitz is None:
             raise HTTPException(404, "Unknown page")
         document = state["store"].documents.find_one({"_id": record["document_id"]}, {"file_storage": 1})
@@ -357,8 +446,9 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
             return Response(pixmap.tobytes("png"), media_type="image/png")
 
     @app.get("/api/images/{unit_id}")
-    def image(unit_id: str) -> FileResponse:
-        unit = state["store"].content_units.find_one({"_id": unit_id, "unit_type": "image"}, {"image_uri": 1})
+    def image(unit_id: str, project: str = Query(DEFAULT_PROJECT)) -> FileResponse:
+        unit = state["store"].content_units.find_one(
+            {"_id": unit_id, "unit_type": "image", **project_filter(check_project(project))}, {"image_uri": 1})
         path = PROJECT_ROOT / unit["image_uri"] if unit and unit.get("image_uri") else None
         if path is None or not path.is_file():
             raise HTTPException(404, "Unknown image")

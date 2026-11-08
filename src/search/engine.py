@@ -22,6 +22,7 @@ from typing import Any, Iterable
 
 from src.graph.graph_builder import analyze, build_graph
 from src.metadata import MetadataStore, format_citation
+from src.projects import DEFAULT_PROJECT, project_filter, scoped_key
 from src.storage.mongodb_store import MongoKnowledgeStore, stable_id
 from src.textutil import collapse_whitespace, concept_key, split_sentences, tokenize, word_spans
 
@@ -59,9 +60,12 @@ class CitationError(ValueError):
 class KnowledgeService:
     """In-memory caches over MongoDB used by the API, loaded at server start."""
 
-    def __init__(self, store: MongoKnowledgeStore, metadata: MetadataStore) -> None:
+    def __init__(self, store: MongoKnowledgeStore, metadata: MetadataStore,
+                 project_id: str = DEFAULT_PROJECT) -> None:
         self.store = store
         self.metadata = metadata
+        self.project_id = project_id
+        self.scope = project_filter(project_id)   # every query below reads this project only
         self._lock = threading.RLock()
         self.loaded_at: float | None = None
         self.load()
@@ -74,7 +78,7 @@ class KnowledgeService:
             self.pages: dict[str, dict[str, Any]] = {}
             self._page_tokens: dict[str, str] = {}
             self.page_by_key: dict[tuple[str, int], str] = {}
-            for unit in self.store.content_units.find({"unit_type": "page"},
+            for unit in self.store.content_units.find({"unit_type": "page", **self.scope},
                                                       {"text": 1, "document_id": 1, "page_number": 1}):
                 self.pages[unit["_id"]] = {"text": unit.get("text") or "", "document_id": unit["document_id"],
                                            "page_number": unit["page_number"]}
@@ -83,17 +87,18 @@ class KnowledgeService:
                 self._page_tokens[unit["_id"]] = " " + " ".join(tokenize(unit.get("text") or "")) + " "
 
             self.postings: dict[str, list[tuple[str, int]]] = {
-                record["_id"]: [(unit, tf) for unit, tf in record["postings"]]
-                for record in database["search_index"].find()}
-            self.doc_len = {record["_id"]: record["length"] for record in database["page_terms"].find({}, {"length": 1})}
-            meta = database["search_meta"].find_one({"_id": "bm25"}) or {}
+                record.get("term", record["_id"]): [(unit, tf) for unit, tf in record["postings"]]
+                for record in database["search_index"].find(self.scope)}
+            self.doc_len = {record["_id"]: record["length"]
+                            for record in database["page_terms"].find(self.scope, {"length": 1})}
+            meta = database["search_meta"].find_one({"_id": scoped_key(self.project_id, "bm25")}) or {}
             self.page_count = meta.get("pages", len(self.doc_len))
             self.avg_len = meta.get("avg_length") or 1.0
 
             self.concepts: dict[str, dict[str, Any]] = {}
             self.unit_concepts: dict[str, set[str]] = defaultdict(set)
             self.sentence_concepts: dict[tuple[str, int, int], set[str]] = defaultdict(set)
-            for concept in self.store.concepts.find({}, {"mentions.quotes": 0}):
+            for concept in self.store.concepts.find(self.scope, {"mentions.quotes": 0}):
                 mentions = concept.pop("mentions", [])
                 concept["mention_units"] = [mention["content_unit_id"] for mention in mentions]
                 self.concepts[concept["_id"]] = concept
@@ -101,8 +106,8 @@ class KnowledgeService:
                     self.unit_concepts[mention["content_unit_id"]].add(concept["_id"])
                     for start, end in mention.get("sentence_spans", []):
                         self.sentence_concepts[(mention["content_unit_id"], start, end)].add(concept["_id"])
-            self.alias_to_concept = {record["_id"]: record["concept_id"]
-                                     for record in database["concept_aliases"].find()
+            self.alias_to_concept = {record.get("key", record["_id"]): record["concept_id"]
+                                     for record in database["concept_aliases"].find(self.scope)
                                      if record["concept_id"] in self.concepts}
             entries = set()
             for concept_id, concept in self.concepts.items():
@@ -112,7 +117,7 @@ class KnowledgeService:
             self.autocomplete_keys = [name for name, _ in self.autocomplete_entries]
 
             self.graph = analyze(build_graph(
-                self.store.concepts.find({}, {"mentions": 0}), database["relationships"].find()))
+                self.store.concepts.find(self.scope, {"mentions": 0}), database["relationships"].find(self.scope)))
             self.load_seconds = round(time.perf_counter() - started, 3)
             self.loaded_at = time.time()
 
@@ -332,7 +337,7 @@ class KnowledgeService:
 
     # ------------------------------------------------------------------ concepts
     def concept_detail(self, concept_id: str) -> dict[str, Any] | None:
-        record = self.store.concepts.find_one({"_id": concept_id})
+        record = self.store.concepts.find_one({"_id": concept_id, **self.scope})
         if record is None:
             return None
         description = record.get("description")
@@ -360,7 +365,7 @@ class KnowledgeService:
                             "content_unit_id": mention["content_unit_id"], "count": mention["count"],
                             "quote": quote, "citation": self.citation(mention["document_id"], mention["page_number"])})
         images = []
-        for unit in self.store.content_units.find({"_id": {"$in": record.get("image_ids", [])}},
+        for unit in self.store.content_units.find({"_id": {"$in": record.get("image_ids", [])}, **self.scope},
                                                   {"caption": 1, "page_number": 1, "document_id": 1}):
             images.append({"id": unit["_id"], "caption": unit.get("caption"), "page_number": unit["page_number"],
                            "citation": self.citation(unit["document_id"], unit["page_number"])})
@@ -403,9 +408,10 @@ class KnowledgeService:
                     "total_nodes": graph.number_of_nodes(), "total_edges": graph.number_of_edges(), "types": types}
 
     def stats(self) -> dict[str, Any]:
-        return {"documents": self.store.documents.count_documents({}),
+        return {"project_id": self.project_id,
+                "documents": self.store.documents.count_documents(self.scope),
                 "pages": len(self.pages),
-                "images": self.store.content_units.count_documents({"unit_type": "image"}),
+                "images": self.store.content_units.count_documents({"unit_type": "image", **self.scope}),
                 "concepts": len(self.concepts), "relationships": self.graph.number_of_edges(),
                 "index_terms": len(self.postings),
                 "index_postings": sum(len(items) for items in self.postings.values()),

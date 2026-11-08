@@ -10,6 +10,23 @@
 <div class="layout">
   <aside class="sidebar">
     <div class="brand"><span class="brand-mark">◆</span> Knowledge Map</div>
+    <div class="project-box">
+      <label for="project-select" class="small muted">Project</label>
+      <select id="project-select"></select>
+      <div class="project-actions">
+        <button type="button" id="project-new" class="small">New</button>
+        <button type="button" id="project-rename" class="small">Rename</button>
+        <button type="button" id="project-delete" class="small danger">Delete</button>
+      </div>
+      <form id="project-form" class="project-form" hidden>
+        <input id="project-name" type="text" maxlength="80" placeholder="Project name" autocomplete="off">
+        <div class="project-actions">
+          <button type="submit" class="small primary">Save</button>
+          <button type="button" id="project-cancel" class="small">Cancel</button>
+        </div>
+      </form>
+      <p id="project-message" class="small muted"></p>
+    </div>
     <nav>
       <a href="#documents" data-screen="documents" class="nav-link">Documents</a>
       <a href="#map" data-screen="map" class="nav-link">Knowledge Map</a>

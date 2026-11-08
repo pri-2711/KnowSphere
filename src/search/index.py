@@ -15,21 +15,24 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+from src.projects import DEFAULT_PROJECT, project_filter, scoped_key
 from src.storage.mongodb_store import MongoKnowledgeStore
 from src.textutil import tokenize
 
 INDEX_VERSION = "bm25-1"
 
 
-def build_index(store: MongoKnowledgeStore) -> dict[str, Any]:
-    """Update page_terms for changed pages, then rewrite postings and corpus statistics."""
+def build_index(store: MongoKnowledgeStore, project_id: str = DEFAULT_PROJECT) -> dict[str, Any]:
+    """Update one project's page_terms for changed pages, then rewrite its postings and statistics."""
+    scope = project_filter(project_id)
     started = time.perf_counter()
     database = store.database
     page_terms = database["page_terms"]
-    existing = {record["_id"]: record for record in page_terms.find({}, {"text_sha256": 1, "version": 1})}
+    existing = {record["_id"]: record for record in page_terms.find(scope, {"text_sha256": 1, "version": 1})}
     seen: set[str] = set()
     tokenized = unchanged = 0
-    for page in store.content_units.find({"unit_type": "page"}, {"text": 1, "document_id": 1, "page_number": 1}):
+    for page in store.content_units.find({"unit_type": "page", **scope},
+                                         {"text": 1, "document_id": 1, "page_number": 1}):
         text = page.get("text") or ""
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         seen.add(page["_id"])
@@ -39,7 +42,8 @@ def build_index(store: MongoKnowledgeStore) -> dict[str, Any]:
             continue
         tokens = tokenize(text)
         page_terms.replace_one({"_id": page["_id"]}, {
-            "document_id": page["document_id"], "page_number": page["page_number"], "text_sha256": digest,
+            "document_id": page["document_id"], "project_id": project_id,
+            "page_number": page["page_number"], "text_sha256": digest,
             "length": len(tokens), "terms": sorted([term, count] for term, count in Counter(tokens).items()),
             "version": INDEX_VERSION,
         }, upsert=True)
@@ -50,17 +54,19 @@ def build_index(store: MongoKnowledgeStore) -> dict[str, Any]:
 
     postings: dict[str, list[list[Any]]] = defaultdict(list)
     lengths: list[int] = []
-    for record in page_terms.find({}, {"terms": 1, "length": 1}):
+    for record in page_terms.find(scope, {"terms": 1, "length": 1}):
         lengths.append(record["length"])
         for term, count in record["terms"]:
             postings[term].append([record["_id"], count])
     index = database["search_index"]
-    index.delete_many({})
-    documents = [{"_id": term, "df": len(items), "postings": sorted(items)} for term, items in sorted(postings.items())]
+    index.delete_many(scope)
+    documents = [{"_id": scoped_key(project_id, term), "term": term, "project_id": project_id, "df": len(items),
+                  "postings": sorted(items)} for term, items in sorted(postings.items())]
     for start in range(0, len(documents), 2000):
         index.insert_many(documents[start:start + 2000])
     page_count = len(lengths)
-    database["search_meta"].replace_one({"_id": "bm25"}, {
+    database["search_meta"].replace_one({"_id": scoped_key(project_id, "bm25")}, {
+        "project_id": project_id,
         "pages": page_count,
         "avg_length": (sum(lengths) / page_count) if page_count else 0.0,
         "terms": len(documents),

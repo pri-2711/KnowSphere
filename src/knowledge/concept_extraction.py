@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from src.config import GLINER_MODEL, LOG_DIR
+from src.projects import DEFAULT_PROJECT, project_filter
 from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment, stable_id
 from src.textutil import clean_surface, is_toc_page, mask_dot_leaders, normalize_concept, split_sentences
 
@@ -194,6 +195,7 @@ def build_page_mentions(page: Mapping[str, Any], spans: Iterable[Mapping[str, An
             "_id": stable_id("concept_mention", normalized, page["_id"]),
             "name": normalized,
             "document_id": page["document_id"],
+            "project_id": page.get("project_id") or DEFAULT_PROJECT,
             "content_unit_id": page["_id"],
             "page_number": page["page_number"],
             "surface_forms": sorted([form, count] for form, count in entry["forms"].items()),
@@ -206,10 +208,12 @@ def build_page_mentions(page: Mapping[str, Any], spans: Iterable[Mapping[str, An
     return records
 
 
-def _page_query(document_id: str | None) -> dict[str, Any]:
+def _page_query(document_id: str | None, project_id: str | None = None) -> dict[str, Any]:
     query: dict[str, Any] = {"unit_type": "page", "quality_status": {"$nin": list(SKIPPED_QUALITY)}}
     if document_id:
         query["document_id"] = document_id
+    if project_id is not None:
+        query.update(project_filter(project_id))
     return query
 
 
@@ -223,6 +227,7 @@ def _save_page(store: MongoKnowledgeStore, page: Mapping[str, Any], digest: str,
         {"_id": page["_id"]},
         {"$set": {
             "document_id": page["document_id"],
+            "project_id": page.get("project_id") or DEFAULT_PROJECT,
             "page_number": page["page_number"],
             "text_sha256": digest,
             "extractor_version": EXTRACTOR_VERSION,
@@ -248,11 +253,12 @@ def extract_concepts(
     limit_pages: int | None = None,
     progress: Callable[[int, int], None] | None = None,
     show_bar: bool = False,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Extract mentions for every page whose text hash is not yet processed."""
+    """Extract mentions for every page (of one project, if given) whose text hash is not yet processed."""
     ensure_indexes(store)
     started = time.perf_counter()
-    cursor = store.content_units.find(_page_query(document_id)).sort([("document_id", 1), ("page_number", 1)])
+    cursor = store.content_units.find(_page_query(document_id, project_id)).sort([("document_id", 1), ("page_number", 1)])
     if limit_pages:
         cursor = cursor.limit(limit_pages)
     pages = list(cursor)

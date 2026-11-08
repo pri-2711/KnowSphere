@@ -295,3 +295,31 @@ erDiagram
 - `Documents/<title>.md`: frontmatter with title, author/editor, year, filename and pages, plus links to every concept found in the document.
 
 The vault is rebuilt on each export.
+
+## 11. Concept-first pipeline (optional, uses Claude)
+
+```mermaid
+flowchart TD
+    P[(content_units: pages)] --> S[Segmentation<br/>paragraphs, headings, topic shifts]
+    S --> C[(content_units: chunks<br/>spans map back to pages)]
+    C -->|text, prompt or model changed,<br/>or last attempt failed| E[Pass 1: Claude extracts concepts<br/>and stated relationships as JSON]
+    E --> R{Valid JSON<br/>and schema?}
+    R -- no --> F[Recovery: send the error back<br/>for this chunk only, max retries]
+    F --> E
+    R -- still no --> X[Chunk marked for review<br/>raw answers and errors kept]
+    R -- yes --> V[Local validation<br/>quotes found, vocabulary, endpoints]
+    V --> C
+    C --> M[Pass 2: merge the same concept<br/>across chunks and documents]
+    M --> G[Graph validation<br/>endpoints and source chunks exist]
+    G --> K[(kg_concepts, kg_relationships)]
+```
+
+- The run is started by hand (`python -m src.kg.orchestrator`); the web app does not call the LLM.
+- Pass 1 results are stored on each chunk, so only new, changed or previously failed chunks are sent again.
+- Every concept mention and relationship keeps a quote whose page offsets point into the stored page text, so each graph element can be traced to its document and page.
+- Pass 2 never creates relationships; it only re-points Pass 1 relationships to merged concepts and combines duplicates.
+- After any add, replace or delete in the app, the concept-first graph is rebuilt from stored results without LLM calls.
+
+## 12. Projects
+
+Every step above runs inside one project. A document, its pages, images, mentions, concepts, relationships, index entries and concept-first graph all carry the same `project_id`; IDs derived from names or file hashes include the project (the default project keeps its original IDs). Merging, relationship building, image linking, indexing and the concept-first enrichment each read only one project's records and replace only that project's records, so two projects never share or connect a concept. The API loads one in-memory search and graph service per project and answers every request from the project named in `?project=`.

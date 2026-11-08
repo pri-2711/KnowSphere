@@ -25,6 +25,7 @@ from functools import lru_cache
 from typing import Any, Iterable, Mapping
 
 from src.knowledge.merging import upsert_all
+from src.projects import DEFAULT_PROJECT, project_filter
 from src.storage.mongodb_store import MongoKnowledgeStore, stable_id
 
 RELATION_VERSION = "relations-1"
@@ -217,16 +218,19 @@ def build_relationships(
     return edges, stats
 
 
-def store_relationships(store: MongoKnowledgeStore) -> dict[str, Any]:
-    """Rebuild the ``relationships`` collection from the current concept nodes."""
+def store_relationships(store: MongoKnowledgeStore, project_id: str = DEFAULT_PROJECT) -> dict[str, Any]:
+    """Rebuild one project's relationships from that project's concept nodes only."""
     started = time.perf_counter()
-    concepts = list(store.concepts.find({}, {"canonical_name": 1, "aliases": 1, "mentions": 1}))
+    scope = project_filter(project_id)
+    concepts = list(store.concepts.find(scope, {"canonical_name": 1, "aliases": 1, "mentions": 1}))
     unit_ids = sorted({mention["content_unit_id"] for concept in concepts for mention in concept["mentions"]})
     page_texts = {unit["_id"]: unit.get("text") or "" for unit in
                   store.content_units.find({"_id": {"$in": unit_ids}}, {"text": 1})}
     edges, stats = build_relationships(concepts, page_texts)
+    for edge in edges:
+        edge["project_id"] = project_id
     collection = store.database["relationships"]
-    stale = upsert_all(collection, edges)
+    stale = upsert_all(collection, edges, scope)
     collection.create_index([("source_id", 1)], name="ix_rel_source")
     collection.create_index([("target_id", 1)], name="ix_rel_target")
     stats.update({"stale_removed": len(stale), "seconds": round(time.perf_counter() - started, 1)})

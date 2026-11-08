@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from src.metadata import UNKNOWN, MetadataStore, format_citation
+from src.projects import DEFAULT_PROJECT, project_filter
 from src.storage.mongodb_store import MongoKnowledgeStore
 from src.textutil import collapse_whitespace
 
@@ -32,10 +33,13 @@ def _yaml(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def export_vault(store: MongoKnowledgeStore, metadata: MetadataStore, vault_dir: Path) -> dict[str, Any]:
-    concepts = list(store.concepts.find())
-    relationships = list(store.database["relationships"].find())
-    documents = {document["_id"]: document for document in store.documents.find()}
+def export_vault(store: MongoKnowledgeStore, metadata: MetadataStore, vault_dir: Path,
+                 project_id: str = DEFAULT_PROJECT) -> dict[str, Any]:
+    """Write one project's vault (concepts, relationships and documents of that project only)."""
+    scope = project_filter(project_id)
+    concepts = list(store.concepts.find(scope))
+    relationships = list(store.database["relationships"].find(scope))
+    documents = {document["_id"]: document for document in store.documents.find(scope)}
 
     names: dict[str, str] = {}
     used: set[str] = set()

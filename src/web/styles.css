@@ -33,6 +33,11 @@ nav { display: flex; flex-direction: column; gap: 4px; }
 .nav-link { color: var(--ink); text-decoration: none; padding: 9px 12px; border-radius: 8px; }
 .nav-link:hover { background: var(--surface-2); }
 .nav-link.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.project-box { display: flex; flex-direction: column; gap: 6px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.project-box select, .project-box input { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: var(--surface); }
+.project-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.project-form { display: flex; flex-direction: column; gap: 6px; }
+.error-text { color: var(--warn); }
 .sidebar-stats { margin-top: 28px; font-size: 12px; color: var(--muted); line-height: 1.8; }
 
 main { padding: 24px clamp(16px, 3vw, 36px); min-width: 0; }

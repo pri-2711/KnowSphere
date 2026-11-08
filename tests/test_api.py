@@ -21,13 +21,13 @@ class FakePipeline:
         self.store = store
         self.files: list[str] = []
 
-    def ingest_file(self, source: Path, filename: str, progress) -> None:
+    def ingest_file(self, source: Path, filename: str, progress, project_id: str = "default") -> None:
         progress("storing pages", 0.3)
         self.files.append(filename)
         self.store.documents.insert_one({"_id": "uploaded-doc", "source_sha256": "uploaded-doc",
                                         "filename": filename, "page_count": 0})
 
-    def knowledge_stages(self, progress) -> None:
+    def knowledge_stages(self, progress, project_id: str = "default") -> None:
         progress("finding concepts", 0.6)
 
     def delete(self, document_id: str, progress) -> None:
