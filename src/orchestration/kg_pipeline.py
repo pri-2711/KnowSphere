@@ -23,6 +23,7 @@ from src.evidence_quality.validation import validate_graph
 from src.knowledge_extraction.claims import build_claims, claims_are_current, extract_claims_chunk
 from src.knowledge_extraction.contributions import contribution_units
 from src.knowledge_extraction.enrichment import enrich
+from src.knowledge_extraction.merging import defined_abbreviations
 from src.knowledge_extraction.resolution import ConceptResolver
 from src.knowledge_extraction.llm_extraction import FAILED, extract_chunk, extraction_is_current
 from src.knowledge_extraction.visual import OCR, extract_image_unit, visual_is_current
@@ -153,7 +154,9 @@ class KGPipeline:
         enrichment = self.config.enrichment
         resolver = ConceptResolver(self.llm, self.kg, project_id, self.config.max_retries,
                                    enrichment.resolution_max_pairs, enabled=enrichment.resolve)
-        concepts, relationships, stats = enrich(units, enrichment, self.embedder, project_id, resolver)
+        definitions = defined_abbreviations(page.get("text") or "" for page in self.kg.units.find(
+            {"unit_type": "page", **project_filter(project_id)}, {"text": 1}))
+        concepts, relationships, stats = enrich(units, enrichment, self.embedder, project_id, resolver, definitions)
         concepts, relationships, validation = validate_graph(concepts, relationships, {u["_id"] for u in units})
         saved = self.kg.save_graph(concepts, relationships, project_id)
         saved.update(self.kg.save_claims(build_claims(units, concepts, project_id), project_id))

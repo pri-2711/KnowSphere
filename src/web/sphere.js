@@ -91,20 +91,48 @@ const Sphere = (() => {
   }
 
   // ---------------------------------------------------------------- governed concept panel
+  const RULES = { abbreviation_defined: "abbreviation defined in the text", alias: "alias given in a passage",
+                  fuzzy: "spelling variant", embedding: "name embedding", llm_abbreviation: "model: abbreviation",
+                  llm_synonym: "model: synonym", reviewer: "reviewer decision", name: "same name" };
+
+  function resolutionSection(c) {
+    if (!c.merge_history && !c.original_names) return "";            // the GLiNER graph has no resolution record
+    const names = (c.original_names || []).map((n) =>
+      `<span class="chip">${escapeHtml(n.name)} <span class="muted">${n.mentions}×</span></span>`).join("");
+    const merges = (c.merge_history || []).length ? `<ul class="list small">${c.merge_history.map((m) =>
+      `<li><strong>${escapeHtml(m.name)}</strong> joined by ${escapeHtml(RULES[m.rule] || m.rule)}${m.reason ? `: <span class="muted">${escapeHtml(m.reason)}</span>` : ""}</li>`).join("")}</ul>`
+      : `<p class="muted small">No other name was merged into this concept.</p>`;
+    const decisions = (c.resolution_decisions || []).length ? `<ul class="list small">${c.resolution_decisions.map((d) =>
+      `<li>${escapeHtml((d.names || []).join(" / "))}: <strong>${escapeHtml(d.decision)}</strong> by ${escapeHtml(d.by || "?")}${d.reason ? ` <span class="muted">(${escapeHtml(d.reason)})</span>` : ""}</li>`).join("")}</ul>` : "";
+    const open = (c.possible_duplicates || []).length ? `<p class="small">Possibly the same as (left for review): ${c.possible_duplicates.map((d) =>
+      `<button type="button" class="chip" data-concept="${escapeHtml(d.id)}">${escapeHtml(d.name)}</button>`).join(" ")}</p>` : "";
+    return `<h3>Written as</h3><div class="chips">${names || '<span class="muted">Unknown</span>'}</div>
+      <h3>Canonical resolution</h3>${merges}${decisions}${open}`;
+  }
+
+  function documentsSection(c) {
+    if (!c.documents_detail) return "";
+    return `<h3>Documents (${c.documents_detail.length})</h3><ul class="list small">${c.documents_detail.map((d) =>
+      `<li>${escapeHtml(d.title)}: ${d.pages.length ? "p. " + d.pages.join(", ") : '<span class="muted">page unknown</span>'}</li>`).join("")}</ul>`;
+  }
+
   function renderKnowledgeConcept(c) {
     const aliases = c.aliases.length ? `<div class="chips">${c.aliases.map((a) => `<span class="chip">${escapeHtml(a)}</span>`).join("")}</div>` : `<p class="muted">None</p>`;
     const edges = c.relationships.length ? `<ul class="list">${c.relationships.map((e) => {
       const other = e.source === c.id ? e.target : e.source;
       const otherName = e.source === c.id ? e.target_name : e.source_name;
+      const direction = e.source === c.id ? "" : "(inverse) ";
       const ev = e.evidence[0];
-      return `<li><span class="relation">${e.source === c.id ? "" : "(inverse) "}${escapeHtml(e.type)}</span>
+      return `<li><span class="relation">${direction}${escapeHtml(e.type)}</span>
         <button type="button" class="chip" data-concept="${escapeHtml(other)}">${escapeHtml(otherName || other)}</button> ${status(e.status)}
         ${ev ? `<p class="quote small">${escapeHtml(ev.quote)}</p>${citationButton(evidenceLabel(ev), ev.content_unit_id, ev.quote)}` : ""}</li>`;
     }).join("")}</ul>` : `<p class="muted">None</p>`;
     return `<h2>${escapeHtml(c.name)}</h2>${Types.badge(c.type)} ${status(c.status)}
       <span class="muted small"> ${c.documents.length} document(s), ${c.degree} connection(s)</span>
-      ${c.description ? `<h3>Description</h3><p>${escapeHtml(c.description)}</p>` : ""}
+      <h3>Description</h3>${c.description ? `<p>${escapeHtml(c.description)}</p><p class="muted small">Written by the extraction model from the quoted evidence.</p>` : '<p class="muted">No description available.</p>'}
       <h3>Aliases</h3>${aliases}
+      ${resolutionSection(c)}
+      ${documentsSection(c)}
       <h3>Claims</h3>${claimGroups(c.claims)}
       <h3>Relationships (${c.relationships.length})</h3>${edges}
       <h3>Evidence</h3>${evidenceList(c.evidence)}`;

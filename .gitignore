@@ -18,3 +18,6 @@ data/inbox/*
 
 # Logs
 *.log
+
+# Graphify code-graph cache (graph.json, graph.html and GRAPH_REPORT.md are kept)
+graphify-out/cache/

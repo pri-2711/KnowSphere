@@ -222,11 +222,43 @@ class KnowledgeApplication:
         return {"source": graph.source, "path": graph.path(a, b, max_hops)}
 
     def concept_knowledge(self, project_id: str, concept_id: str, source: str | None = None) -> dict[str, Any]:
+        """One governed concept by its canonical ID: the governed detail, plus (concept-first graph) the names
+        it was written as, its documents and pages, and how it was resolved (merges, decisions, open questions)."""
         graph = self.knowledge_graph(project_id, source)
         detail = graph.concept_detail(concept_id)
         if detail is None:
             raise NotFound("Unknown concept in this project")
-        return {"source": graph.source, **detail}
+        result: dict[str, Any] = {"source": graph.source, **detail}
+        record = self.store.database[KG_CONCEPTS].find_one({"_id": concept_id, **project_filter(project_id)}) \
+            if graph.source == "concept_first" else None
+        if record is not None:
+            result.update(self._resolution_detail(project_id, record, graph))
+        return result
+
+    def _resolution_detail(self, project_id: str, record: dict[str, Any], graph: GovernedGraph) -> dict[str, Any]:
+        mentions = record.get("mentions", [])
+        names = Counter(m.get("name") for m in mentions if m.get("name"))
+        titles = {d.id: d.title or d.filename for d in self.repository.documents(project_id)}
+        pages: dict[str, set] = {}
+        for mention in mentions:
+            pages.setdefault(mention["document_id"], set()).add(mention.get("page_number"))
+        keys = {record.get("normalized_name")} | {m["key"] for m in record.get("merged_from", [])}
+        decisions = [{"names": r.get("names"), "decision": r.get("decision"), "reason": r.get("reason"),
+                      "by": f"reviewer:{r['reviewer']}" if r.get("source") == "reviewer" else r.get("model"),
+                      "id": r["_id"]}
+                     for r in self.store.database["kg_resolutions"].find(project_filter(project_id))
+                     if keys & set(r.get("keys", []))]
+        reasons = record.get("merge_reasons", {})
+        return {
+            "canonical_name": record.get("canonical_name"),
+            "original_names": [{"name": name, "mentions": count} for name, count in names.most_common()],
+            "documents_detail": [{"document_id": d, "title": titles.get(d, d),
+                                  "pages": sorted(p for p in pages[d] if p is not None)} for d in sorted(pages)],
+            "merge_history": [{**m, "reason": reasons.get(m["name"], "")} for m in record.get("merged_from", [])],
+            "resolution_decisions": decisions,
+            "possible_duplicates": [{"id": d, "name": graph.concepts[d].name if d in graph.concepts else d}
+                                    for d in record.get("possible_duplicates", [])],
+        }
 
     def find_concepts(self, project_id: str, text: str, source: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         graph = self.knowledge_graph(project_id, source)

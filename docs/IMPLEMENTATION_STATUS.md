@@ -127,6 +127,16 @@ Legend: **Done** (implemented and exercised by a test), **Partial**, **Missing**
 | Concurrency protection | Done | project locks |
 | Performance | Done (measured) | hybrid search median 78 ms, max 101 ms; research answers median 139 ms (10 queries, real database). Target from the planning document: search under 500 ms |
 
+## Canonical resolution and governed concept detail (2026-11-18)
+
+| Item | Status | Notes |
+|---|---|---|
+| NASA and its full form as one node, GLiNER graph ("Extracted mentions") | Done in code, **not yet applied to the real database** | Rule 1b in `merging.py`: an abbreviation the project's text defines ("Full Form (ABBR)" or "ABBR (Full Form)") with matching initials merges into the full form; ambiguous definitions merge nothing. Read-only dry run on the real data: 160 definitions found, 2 merges (NASA, MSIS), 0 false merges observed. Applying it rebuilds the `concepts` collection (`python -m src.api.cli rebuild`), which needs approval |
+| Same rule in the governed graph (Pass 2) | Done | `enrichment.cluster`; works without a model, respects reviewer "keep apart" decisions. Verified with a scripted model only (simulated); the real governed graph is empty until Pass 1 runs with Ollama |
+| Governed concept detail | Done | canonical name, names as written, description, type, relationships with names, documents and pages, evidence, status, merge history with reasons, resolution decisions, open duplicates |
+| Governed node click | Done | two race conditions fixed (an earlier graph load could redraw the map after a focused one; a late concept response could fill the panel after another click or a project switch). Real-browser regression test `tests/test_browser_governed.py` |
+| Graphify code graph | Done | `graphify-out/` (graph.html, graph.json, GRAPH_REPORT.md), local AST only; showed that `merge_concepts()` never reached the abbreviation logic before the fix |
+
 ## Quality targets from the planning document
 
 | Target | Status |

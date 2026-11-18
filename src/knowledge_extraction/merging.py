@@ -3,6 +3,12 @@
 Rules, applied in this order:
 1. alias hash: names with the same ``concept_key`` (case, plural, hyphen and
    spacing differences only) always merge;
+1b. defined abbreviation: the project's own text defines the abbreviation
+   ("National Aeronautics and Space Administration (NASA)" or "NASA (National
+   Aeronautics and Space Administration)") and its letters are the initials of the
+   full form. The full form becomes the canonical name, the abbreviation an alias.
+   An abbreviation defined with two different full forms in one project is
+   ambiguous and merges nothing. General rule, no list of terms, no model;
 2. fuzzy string similarity (rapidfuzz ratio) at or above ``FUZZY_THRESHOLD``;
 3. embedding cosine similarity (fastembed, bge-small) at or above
    ``EMBEDDING_THRESHOLD``.
@@ -30,6 +36,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from src.contracts.interfaces import Embedder
+from src.contracts.vocabulary import looks_like_abbreviation
+from src.knowledge_extraction.resolution import is_initialism
 from src.knowledge_repository.projects import DEFAULT_PROJECT, project_filter, scoped_id, scoped_key
 from src.knowledge_repository.mongodb_store import MongoKnowledgeStore, upsert_all  # noqa: F401
 from src.textutil import concept_key, singularize, stem
@@ -157,12 +165,47 @@ class _UnionFind:
             index = self.parent[index]
         return index
 
-    def union(self, a: int, b: int) -> int:
+    def union(self, a: int, b: int, keep: int | None = None) -> int:
         root_a, root_b = self.find(a), self.find(b)
-        # The smaller index has more mentions (names are sorted), so it stays canonical.
-        keep, drop = min(root_a, root_b), max(root_a, root_b)
+        # The smaller index has more mentions (names are sorted), so it stays canonical, unless the caller
+        # names the root to keep (a defined abbreviation keeps its full form).
+        if keep is None or keep not in (root_a, root_b):
+            keep = min(root_a, root_b)
+        drop = root_b if keep == root_a else root_a
         self.parent[drop] = keep
         return keep
+
+
+_CONNECTORS = frozenset({"and", "of", "the", "for", "in", "on", "to", "a", "an", "with", "by", "&"})
+_PARENS = re.compile(r"\(\s*([^()\n]{1,80}?)\s*\)")
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9&\-]*")
+
+
+def defined_abbreviations(texts: Iterable[str]) -> dict[str, dict[str, str]]:
+    """Abbreviations the text defines: abbreviation key -> {full form key: defining quote}.
+
+    "Full Form (ABBR)": the shortest run of words before the parenthesis whose initials are ABBR.
+    "ABBR (Full Form)": the words in the parenthesis are the full form of the token before it.
+    """
+    found: dict[str, dict[str, str]] = defaultdict(dict)
+    for text in texts:
+        for match in _PARENS.finditer(text or ""):
+            inside = match.group(1).strip()
+            before = text[max(0, match.start() - 160):match.start()]
+            words = _WORD.findall(before.split(".")[-1])
+            if looks_like_abbreviation(inside):
+                for size in range(2, min(len(words), 14) + 1):
+                    phrase = words[-size:]
+                    if phrase[0].lower() in _CONNECTORS:
+                        continue
+                    if is_initialism(inside, " ".join(phrase)):
+                        quote = f"{' '.join(phrase)} ({inside})"
+                        found[concept_key(inside)].setdefault(concept_key(" ".join(phrase)), quote)
+                        break
+            elif words and looks_like_abbreviation(words[-1]) and len(inside.split()) >= 2 \
+                    and is_initialism(words[-1], inside):
+                found[concept_key(words[-1])].setdefault(concept_key(inside), f"{words[-1]} ({inside})")
+    return dict(found)
 
 
 def _fuzzy_pairs(names: Sequence[str]) -> list[tuple[float, int, int]]:
@@ -206,8 +249,12 @@ def _pair_score(rule: str, a: str, b: str, vectors: Mapping[str, Any]) -> float:
 def cluster_candidates(
     candidates: Mapping[str, Candidate],
     embedder: Embedder | None,
+    definitions: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[list[list[str]], list[dict[str, Any]]]:
-    """Return clusters of names (canonical first) and the merge decision log."""
+    """Return clusters of names (canonical first) and the merge decision log.
+
+    ``definitions`` (from ``defined_abbreviations``) adds rule 1b.
+    """
     names = sorted(candidates, key=lambda name: (-candidates[name].count, name))
     index_of = {name: index for index, name in enumerate(names)}
     union = _UnionFind(len(names))
@@ -224,6 +271,24 @@ def cluster_candidates(
         for other in members[1:]:
             union.union(index_of[members[0]], index_of[other])
             record("merged", "alias_hash", 1.0, members[0], other, "same normalized key")
+
+    for short_key, full_forms in sorted((definitions or {}).items()):
+        shorts = by_key.get(short_key, [])
+        present = {key: quote for key, quote in full_forms.items() if by_key.get(key) and key != short_key}
+        if not shorts or not present:
+            continue
+        if len(present) > 1:                     # "SE" defined as two different things: never guess
+            for key in sorted(present):
+                record("rejected", "abbreviation_defined", 1.0, shorts[0], by_key[key][0],
+                       "ambiguous: defined with several full forms in this project")
+            continue
+        (full_key, quote), = present.items()
+        short, full = candidates[shorts[0]], candidates[by_key[full_key][0]]
+        if _digits(short.name) != _digits(full.name) or _negates(short.words, full.words):
+            record("rejected", "abbreviation_defined", 1.0, short.name, full.name, "numbers or negation differ")
+            continue
+        union.union(index_of[short.name], index_of[full.name], keep=union.find(index_of[full.name]))
+        record("merged", "abbreviation_defined", 1.0, full.name, short.name, f"defined in the text: {quote}")
 
     vectors: dict[str, Any] = {}
     pairs: list[tuple[str, float, int, int]] = [("fuzzy", s, i, j) for s, i, j in _fuzzy_pairs(names)]
@@ -257,7 +322,9 @@ def cluster_candidates(
     clusters: dict[int, list[str]] = defaultdict(list)
     for index, name in enumerate(names):
         clusters[union.find(index)].append(name)
-    return [clusters[root] for root in sorted(clusters)], log
+    # The root is the canonical name (build_nodes reads the first member); it is the most mentioned name
+    # unless a rule chose another root (a defined abbreviation keeps its full form).
+    return [[names[root]] + [name for name in clusters[root] if name != names[root]] for root in sorted(clusters)], log
 
 
 class _Cached:
@@ -359,7 +426,9 @@ def merge_concepts(
     started = time.perf_counter()
     scope = project_filter(project_id)
     candidates, raw_names = load_candidates(store, min_mentions, project_id)
-    clusters, log = cluster_candidates(candidates, embedder)
+    definitions = defined_abbreviations(
+        unit.get("text") or "" for unit in store.content_units.find({"unit_type": "page", **scope}, {"text": 1}))
+    clusters, log = cluster_candidates(candidates, embedder, definitions)
     unit_ids = {record["content_unit_id"] for candidate in candidates.values() for record in candidate.mentions}
     page_texts = {unit["_id"]: unit.get("text") or "" for unit in
                   store.content_units.find({"_id": {"$in": sorted(unit_ids)}}, {"text": 1})}

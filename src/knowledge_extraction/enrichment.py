@@ -3,6 +3,9 @@
 Local concepts from all chunks (all documents) are grouped by their normalized
 name key, then groups are merged when they are the same idea:
 
+0. ``abbreviation_defined``: the project's text defines an abbreviation ("National
+   Aeronautics and Space Administration (NASA)") whose letters are the full form's
+   initials; the full form is canonical. Ambiguous definitions merge nothing.
 1. ``alias``: a group's name is an alias another passage gave for a concept
    ("Systems Engineering (SE)"). An alias claimed for two different concepts is
    ambiguous and merges nothing.
@@ -204,7 +207,8 @@ def _hard_guard(a: Group, b: Group) -> str | None:
 
 
 def cluster(groups: Mapping[str, Group], config: EnrichmentConfig, embedder: Embedder | None = None,
-            resolver: ConceptResolver | None = None) -> tuple[dict[str, str], list[dict[str, Any]]]:
+            resolver: ConceptResolver | None = None,
+            definitions: Mapping[str, Mapping[str, str]] | None = None) -> tuple[dict[str, str], list[dict[str, Any]]]:
     """Map every group key to its cluster's canonical key, and log every merge decision."""
     # Canonical choice: never a name another passage calls an alias ("SE"), then most mentions,
     # then the more complete (longer) name.
@@ -219,7 +223,28 @@ def cluster(groups: Mapping[str, Group], config: EnrichmentConfig, embedder: Emb
         members_a, members_b = union.members[union.find(a)], union.members[union.find(b)]
         return any((x in members_a and y in members_b) or (y in members_a and x in members_b) for x, y in apart)
 
-    alias, log = alias_candidates(groups)
+    log: list[dict[str, Any]] = []
+    for short, full_forms in sorted((definitions or {}).items()):
+        present = {key: quote for key, quote in full_forms.items() if key in groups and key != short}
+        if short not in groups or not present:
+            continue
+        if len(present) > 1:                     # defined as several things in this project: never guess
+            for key in sorted(present):
+                log.append({"rule": "abbreviation_defined", "score": 1.0, "a": groups[key].name, "b": groups[short].name,
+                            "keys": [key, short], "decision": "rejected",
+                            "reason": "ambiguous: defined with several full forms in this project"})
+            continue
+        (full, quote), = present.items()
+        reason = _hard_guard(groups[full], groups[short]) or (
+            "a reviewer kept these apart" if kept_apart(full, short) else None)
+        log.append({"rule": "abbreviation_defined", "score": 1.0, "a": groups[full].name, "b": groups[short].name,
+                    "keys": [full, short], "decision": "rejected" if reason else "merged",
+                    "reason": reason or f"defined in the text: {quote}"})
+        if not reason:
+            union.union(full, short, keep=union.find(full))
+
+    alias, alias_log = alias_candidates(groups)
+    log += alias_log
     candidates = alias + sorted(fuzzy_candidates(groups, config), key=lambda c: -c[1])
     vectors: dict[str, Any] = {}
     synonyms: list[tuple[float, str, str]] = []      # pairs left apart that the resolver may judge
@@ -289,10 +314,13 @@ def build_concepts(groups: Mapping[str, Group], canonical_of: Mapping[str, str],
                 open_pairs[a].add(scoped_id("kg_concept", project_id, b))
                 open_pairs[b].add(scoped_id("kg_concept", project_id, a))
     merged_rules = {}
+    merged_reasons: dict[str, str] = {}
     for entry in log:
         if entry["decision"] == "merged":
             merged_rules.setdefault(entry["b"], entry["rule"])
             merged_rules.setdefault(entry["a"], entry["rule"])
+            if entry.get("reason"):
+                merged_reasons.setdefault(entry["b"], entry["reason"])
     concepts = []
     for root, keys in members.items():
         canonical = groups[root]
@@ -324,6 +352,9 @@ def build_concepts(groups: Mapping[str, Group], canonical_of: Mapping[str, str],
             "merged_from": [{"key": key, "name": groups[key].name, "rule": merged_rules.get(groups[key].name, "name")}
                             for key in sorted(keys) if key != root],
             "possible_duplicates": sorted(open_pairs.get(root, ())),
+            # why each name joined this concept: the defining quote, the model's or the reviewer's reason
+            "merge_reasons": {groups[key].name: merged_reasons[groups[key].name] for key in sorted(keys)
+                              if key != root and groups[key].name in merged_reasons},
         })
     return concepts
 
@@ -365,6 +396,7 @@ def build_relationships(relations: list[dict[str, Any]], canonical_of: Mapping[s
 
 def enrich(chunks: Iterable[Mapping[str, Any]], config: EnrichmentConfig, embedder: Embedder | None = None,
            project_id: str = DEFAULT_PROJECT, resolver: ConceptResolver | None = None,
+           definitions: Mapping[str, Mapping[str, str]] | None = None,
            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Run Pass 2 over one project's extracted chunks. Returns (concepts, relationships, stats incl. merge log).
 
@@ -372,7 +404,7 @@ def enrich(chunks: Iterable[Mapping[str, Any]], config: EnrichmentConfig, embedd
     project is a different concept and can never be merged or connected with this one.
     """
     groups, relations = collect_groups(chunks)
-    canonical_of, log = cluster(groups, config, embedder, resolver)
+    canonical_of, log = cluster(groups, config, embedder, resolver, definitions)
     concepts = build_concepts(groups, canonical_of, log, project_id)
     relationships, edge_stats = build_relationships(relations, canonical_of, project_id)
     merges = Counter(entry["rule"] for entry in log if entry["decision"] == "merged")

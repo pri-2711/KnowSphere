@@ -240,8 +240,17 @@ function graphQuery(focus) {
   return `/api/graph?${params}`;
 }
 
+// Each graph load and each concept request gets a number; a response is shown only if no newer request was
+// made since (and the project did not change). Without this, a slower earlier load could redraw the map after a
+// focused one (losing the selected node) and a slow concept request could fill the panel with a stale concept.
+let graphRequest = 0;
+let conceptRequest = 0;
+
 async function loadGraph(focus) {
+  const ticket = ++graphRequest;
+  const project = currentProject;
   const data = await api(graphQuery(focus));
+  if (ticket !== graphRequest || project !== currentProject) return;   // a newer load or another project
   const typeSelect = $("#filter-type");
   if (typeSelect.options.length <= 1) {
     typeSelect.innerHTML += data.types.map((type) => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`).join("");
@@ -295,6 +304,9 @@ function ensureGraph() {
 }
 
 async function selectNode(conceptId) {
+  const ticket = ++conceptRequest;
+  const project = currentProject;
+  const source = graphSource();            // the graph the node belongs to; the ID is the canonical concept ID
   const node = cy.getElementById(conceptId);
   if (node.nonempty()) {
     cy.elements().addClass("faded");
@@ -305,11 +317,15 @@ async function selectNode(conceptId) {
   }
   const panel = $("#panel");
   panel.innerHTML = `<p class="muted">Loading…</p>`;
+  const current = () => ticket === conceptRequest && project === currentProject;
   try {
-    panel.innerHTML = graphSource() === "concept_first"
+    const html = source === "concept_first"
       ? Sphere.renderKnowledgeConcept(await api(`/api/knowledge/concepts/${encodeURIComponent(conceptId)}?source=concept_first`))
       : renderConcept(await api(`/api/concepts/${encodeURIComponent(conceptId)}`));
-  } catch (e) { panel.innerHTML = `<p class="muted">Could not load concept: ${escapeHtml(e.message)}</p>`; }
+    if (current()) panel.innerHTML = html;
+  } catch (e) {
+    if (current()) panel.innerHTML = `<p class="muted">Could not load concept: ${escapeHtml(e.message)}</p>`;
+  }
 }
 
 function renderConcept(concept) {
@@ -511,6 +527,8 @@ async function loadProjects() {
 // Switching project clears everything shown from the previous one and reloads from the server.
 function switchProject(projectId) {
   currentProject = projectId;
+  graphRequest++;                          // responses for the previous project are dropped
+  conceptRequest++;
   try { localStorage.setItem("km-project", projectId); } catch (e) { /* per-browser convenience only */ }
   renderProjects();
   if (cy) {
