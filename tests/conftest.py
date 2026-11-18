@@ -10,13 +10,14 @@ import mongomock
 import numpy as np
 import pytest
 
-from src.knowledge.concept_extraction import GlinerExtractor, extract_concepts
-from src.knowledge.merging import merge_concepts
-from src.knowledge.relationships import store_relationships
-from src.metadata import MetadataStore
-from src.search.engine import KnowledgeService
-from src.search.index import build_index
-from src.storage.mongodb_store import MongoKnowledgeStore, stable_id
+from src.knowledge_extraction.gliner_concepts import extract_concepts
+from src.model_runtime.gliner import GlinerExtractor
+from src.knowledge_extraction.merging import merge_concepts
+from src.knowledge_extraction.relationships import store_relationships
+from src.knowledge_repository.metadata import MetadataStore
+from src.retrieval.engine import KnowledgeService
+from src.retrieval.lexical_index import build_index
+from src.knowledge_repository.mongodb_store import MongoKnowledgeStore, stable_id
 
 PHRASES = {
     "systems engineering": ("engineering concept", 0.9),

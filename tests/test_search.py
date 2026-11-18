@@ -7,9 +7,9 @@ import re
 import pytest
 from conftest import page_id
 
-from src.metadata import format_citation
-from src.search.engine import NOT_FOUND, CitationError, phrase_match
-from src.search.index import build_index
+from src.knowledge_repository.metadata import format_citation
+from src.retrieval.engine import NOT_FOUND, CitationError, phrase_match
+from src.retrieval.lexical_index import build_index
 
 CITATION = re.compile(r"^\[[^|\]]+ \| [^|\]]+ \| [^|\]]+, p\. \d+\]$")
 SAMPLE_QUERIES = [

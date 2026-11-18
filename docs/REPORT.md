@@ -116,7 +116,7 @@ All numbers below were measured on the development machine (Windows 11, 8 logica
 
 ### 8.1 Corpus and stored data
 
-Counts were read from MongoDB after the final rebuild (`python -m src.pipeline stats` and `collStats`).
+Counts were read from MongoDB after the final rebuild (`python -m src.orchestration.pipeline stats` and `collStats`).
 
 | Item | Value |
 |---|---|
@@ -165,7 +165,7 @@ Concept extraction speed: the step 2 version (one GLiNER call per page, unbatche
 
 At 1.7 s per page, the 551 pages take about 16 minutes. That is 7 to 8 times faster per page than the unbatched version, and well under the previous 2-hour estimate. With the other stages (about 140 s in the run above, model load included), a full run from scratch is projected at about 18 minutes without other load.
 
-Re-running `python -m src.pipeline run` on unchanged books took 16.0 s in total. Every page was skipped by hash, so only merging (9.2 s), image links (3.7 s), relationships (2.0 s) and the index (0.7 s) ran.
+Re-running `python -m src.orchestration.pipeline run` on unchanged books took 16.0 s in total. Every page was skipped by hash, so only merging (9.2 s), image links (3.7 s), relationships (2.0 s) and the index (0.7 s) ran.
 
 ### 8.3 Document changes through the running server
 

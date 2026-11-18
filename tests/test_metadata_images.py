@@ -6,9 +6,10 @@ from pathlib import Path
 
 import fitz
 
-from src.ingest.images import extract_images, link_images_to_concepts
-from src.metadata import MetadataStore, detect_metadata, format_citation
-from src.storage.mongodb_store import stable_id
+from src.document_intelligence.images import extract_images
+from src.knowledge_extraction.image_links import link_images_to_concepts
+from src.knowledge_repository.metadata import MetadataStore, detect_metadata, format_citation
+from src.knowledge_repository.mongodb_store import stable_id
 
 
 def _make_book(path: Path) -> None:

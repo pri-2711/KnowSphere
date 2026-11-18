@@ -11,7 +11,7 @@ from conftest import page_id
 from fastapi.testclient import TestClient
 
 from src.api.app import create_app
-from src.search.engine import NOT_FOUND
+from src.retrieval.engine import NOT_FOUND
 
 
 class FakePipeline:

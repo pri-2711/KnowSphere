@@ -2,6 +2,9 @@
 
 Run (inside the .venv, from the project root):
     uvicorn src.api.app:app --port 8000
+
+This module only translates HTTP to ``orchestration.services.KnowledgeApplication``
+calls (the same services the CLI uses) and runs long work as background jobs.
 """
 
 from __future__ import annotations
@@ -15,23 +18,22 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.config import (IMAGE_DIR, METADATA_FILE, PROJECT_ROOT, UPLOAD_DIR, WATCH_DIR, WATCH_ENABLED,
-                        WATCH_INTERVAL, WEB_DIR)
-from src.ingest.documents import delete_project
+from src.config import METADATA_FILE, PROJECT_ROOT, WATCH_DIR, WATCH_ENABLED, WATCH_INTERVAL, WEB_DIR
 from src.envcheck import warn_if_needed
-from src.ingest.watcher import FolderWatcher, WatchService, process_events
-from src.metadata import MetadataStore
-from src.projects import (DEFAULT_PROJECT, ProjectError, ProjectStore, document_id_for, migrate,
-                          project_filter)
-from src.search.engine import KnowledgeService
-from src.storage.mongodb_store import MongoKnowledgeStore, connect_from_environment, sha256_file
+from src.knowledge_repository.metadata import MetadataStore
+from src.knowledge_repository.mongodb_store import MongoKnowledgeStore, connect_from_environment, sha256_file
+from src.knowledge_repository.projects import DEFAULT_PROJECT, ProjectError
+from src.orchestration.documents import ACCEPTED_FORMATS, accepted_name, upload_problem
+from src.orchestration.services import KnowledgeApplication, NotFound, ProjectBusy
+from src.orchestration.watcher import FolderWatcher, WatchService, process_events
+from src.retrieval.engine import KnowledgeService
 from src.textutil import collapse_whitespace
 
 try:
@@ -56,6 +58,37 @@ class AskRequest(BaseModel):
     question: str
 
 
+class AdjudicationBody(BaseModel):
+    reviewer: str
+    decision: Literal["accept", "reject"]
+    note: str = ""
+
+
+class ReviewerNote(BaseModel):
+    reviewer: str
+    note: str = ""
+
+
+class MergeBody(BaseModel):
+    a: str                                  # concept ID or name
+    b: str
+    decision: Literal["same", "different"]
+    reviewer: str
+    note: str = ""
+
+
+class OntologyBody(BaseModel):
+    actor: str
+    types: list[dict[str, Any]]
+
+
+class ProposalBody(BaseModel):
+    agent: str
+    kind: Literal["concept", "relationship", "claim"]
+    unit_id: str
+    data: dict[str, Any]
+
+
 class JobManager:
     """Runs one processing job at a time in a background thread and tracks progress."""
 
@@ -69,7 +102,7 @@ class JobManager:
         job_id = uuid.uuid4().hex[:12]
         job = {"id": job_id, "kind": kind, "project_id": project_id, "filename": filename,
                "document_id": document_id, "status": "queued",
-               "stage": "queued", "progress": 0.0, "error": None, "created_at": time.time()}
+               "stage": "queued", "progress": 0.0, "error": None, "created_at": time.time(), "result": None}
         with self._lock:
             self.jobs[job_id] = job
 
@@ -79,8 +112,9 @@ class JobManager:
         def run() -> None:
             job["status"] = "running"
             try:
-                work(progress)
-                job.update(status="done", stage="done", progress=1.0)
+                result = work(progress)
+                job.update(status="done", stage="done", progress=1.0,
+                           result=result if isinstance(result, (dict, list)) else None)
             except Exception as exc:  # reported to the UI
                 logger.exception("job %s failed", job_id)
                 job.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -121,19 +155,15 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
         if store is None:
             warn_if_needed()
             client, database = connect_from_environment()
-            state["store"] = MongoKnowledgeStore(database, PROJECT_ROOT)
+            active_store = MongoKnowledgeStore(database, PROJECT_ROOT)
         else:
-            state["store"] = store
-        state["metadata"] = metadata or MetadataStore(METADATA_FILE)
-        migrate(state["store"].database)                 # adds project_id "default" where missing; deletes nothing
-        state["projects"] = ProjectStore(state["store"].database)
-        state["services"] = {}                           # one KnowledgeService per project, loaded on first use
-        state["services_lock"] = threading.Lock()
+            active_store = store
+        state["app"] = KnowledgeApplication(active_store, metadata or MetadataStore(METADATA_FILE),
+                                            pipeline_factory)
         state["jobs"] = JobManager()
-        state["pipeline"] = None
         state["watch"] = None
         if watch_folder is not None:
-            watch = WatchService(FolderWatcher(state["store"], watch_folder), submit_watch_events, watch_interval)
+            watch = WatchService(FolderWatcher(active_store, watch_folder), submit_watch_events, watch_interval)
             state["watch"] = watch
             watch.start()
         yield
@@ -153,88 +183,63 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
             response.headers["Cache-Control"] = "no-cache"
         return response
 
-    def service(project: str = DEFAULT_PROJECT) -> KnowledgeService:
-        """The project's in-memory service; it only ever holds that project's records."""
-        with state["services_lock"]:
-            cached = state["services"].get(project)
-            if cached is None:
-                cached = KnowledgeService(state["store"], state["metadata"], project)
-                state["services"][project] = cached
-            return cached
+    def services() -> KnowledgeApplication:
+        return state["app"]
 
-    def reload(project: str) -> None:
-        with state["services_lock"]:
-            state["services"].pop(project, None)
-        service(project)
-
-    def check_project(project: str) -> str:
+    def call(action: Callable[[], Any]) -> Any:
+        """Run a service call and map its errors to HTTP status codes."""
         try:
-            state["projects"].get(project)
-        except ProjectError as exc:
+            return action()
+        except NotFound as exc:
             raise HTTPException(404, str(exc)) from exc
-        return project
+        except (ProjectError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except ProjectBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-    def get_pipeline() -> Any:
-        if state["pipeline"] is None:
-            if pipeline_factory is not None:
-                state["pipeline"] = pipeline_factory()
-            else:
-                from src.pipeline import Pipeline
-                state["pipeline"] = Pipeline(state["store"], state["metadata"])
-        return state["pipeline"]
+    def retriever(project: str) -> KnowledgeService:
+        return call(lambda: services().retriever(project))
 
     def submit_watch_events(events: list[Any]) -> dict[str, Any]:
         watch = state["watch"]
 
         def work(progress: Callable[[str, float], None]) -> None:
             try:
-                process_events(get_pipeline(), watch.watcher, events, progress)
+                process_events(services().pipeline, watch.watcher, events, progress)
                 progress("refreshing caches", 0.99)
                 for project in {event.project_id for event in events}:
-                    reload(project)
+                    services().reload(project)
             finally:
                 watch.busy.clear()
 
         label = ", ".join(f"{event.kind} {event.relative_path}" for event in events)
         return state["jobs"].submit(f"watched folder: {label}"[:200], None, work, kind="watch", project_id=None)
 
-    def run_job(kind: str, filename: str, document_id: str | None,
-                action: Callable[[Any, Callable[[str, float], None]], Any], project: str,
-                temp_dir: Path | None = None) -> dict:
-        """Queue a document change followed by the project's knowledge stages and a cache reload."""
-        def work(progress: Callable[[str, float], None]) -> None:
+    def job(kind: str, label: str, document_id: str | None, project: str | None,
+            work: Callable[[Callable[[str, float], None]], Any], temp_dir: Path | None = None) -> dict:
+        def run(progress: Callable[[str, float], None]) -> Any:
             try:
-                pipeline = get_pipeline()
-                action(pipeline, progress)
-                pipeline.knowledge_stages(progress, project_id=project)
-                progress("refreshing caches", 0.99)
-                reload(project)
+                return work(progress)
             finally:
                 if temp_dir is not None:
                     shutil.rmtree(temp_dir, ignore_errors=True)
-        return state["jobs"].submit(filename, document_id, work, kind=kind, project_id=project)
+        return state["jobs"].submit(label, document_id, run, kind=kind, project_id=project)
 
     async def save_upload(file: UploadFile) -> tuple[Path, Path, str, str]:
-        """Store an uploaded PDF in a temporary folder; returns (folder, path, filename, document id)."""
+        """Store an uploaded PDF, DOCX, HTML or Markdown file in a temporary folder; returns
+        (folder, path, filename, sha256). The content must match the file type."""
         filename = Path(file.filename or "document.pdf").name
-        if not filename.lower().endswith(".pdf"):
-            raise HTTPException(400, "Only PDF files are accepted")
+        if not accepted_name(filename):
+            raise HTTPException(400, f"Accepted files: {ACCEPTED_FORMATS}")
         temp_dir = Path(tempfile.mkdtemp(prefix="km-upload-"))
         temp_path = temp_dir / filename
         with temp_path.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
-        with temp_path.open("rb") as handle:
-            if handle.read(5) != b"%PDF-":
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                raise HTTPException(400, "The file is not a PDF")
+        problem = upload_problem(temp_path)
+        if problem:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise HTTPException(400, problem)
         return temp_dir, temp_path, filename, sha256_file(temp_path)
-
-    def require_document(document_id: str, project: str) -> dict[str, Any]:
-        """The document, only if it belongs to this project."""
-        document = state["store"].documents.find_one({"_id": document_id, **project_filter(project)}, {"filename": 1})
-        if document is None:
-            raise HTTPException(404, "Unknown document in this project")
-        return document
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -243,125 +248,112 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         try:
-            state["store"].database.command("ping")
+            services().store.database.command("ping")
             mongo = "ok"
         except Exception as exc:  # pragma: no cover - depends on server
             mongo = f"error: {exc}"
-        return {"status": "ok", "mongodb": mongo, "cache_loaded_at": service().loaded_at}
+        return {"status": "ok", "mongodb": mongo, "cache_loaded_at": retriever(DEFAULT_PROJECT).loaded_at}
+
+    @app.get("/api/models")
+    def models() -> dict[str, Any]:
+        """Which model serves which capability (nothing is loaded by this call)."""
+        router = getattr(services().pipeline, "router", None)
+        return router.describe() if router is not None else {}
 
     # ------------------------------------------------------------------ projects
     @app.get("/api/projects")
     def projects() -> list[dict[str, Any]]:
-        store_ = state["store"]
-        return [{"id": project["_id"], "name": project["name"], "is_default": project["_id"] == DEFAULT_PROJECT,
-                 "documents": store_.documents.count_documents(project_filter(project["_id"])),
-                 "concepts": store_.concepts.count_documents(project_filter(project["_id"]))}
-                for project in state["projects"].list()]
+        return services().list_projects()
 
     @app.post("/api/projects")
     def create_project(body: ProjectBody) -> dict[str, Any]:
-        try:
-            project = state["projects"].create(body.name)
-        except ProjectError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return {"id": project["_id"], "name": project["name"], "is_default": False, "documents": 0, "concepts": 0}
+        return call(lambda: services().create_project(body.name))
 
     @app.put("/api/projects/{project_id}")
     def rename_project(project_id: str, body: ProjectBody) -> dict[str, Any]:
-        check_project(project_id)
-        try:
-            project = state["projects"].rename(project_id, body.name)
-        except ProjectError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return {"id": project["_id"], "name": project["name"]}
+        return call(lambda: services().rename_project(project_id, body.name))
 
     @app.delete("/api/projects/{project_id}")
     def delete_project_endpoint(project_id: str) -> dict[str, Any]:
         """Delete a project with all its documents and graph (background job). Other projects are untouched."""
-        project = state["projects"].get(check_project(project_id))
+        project = call(lambda: services().project(project_id))
         if project_id == DEFAULT_PROJECT:
             raise HTTPException(400, "The default project cannot be deleted")
+        return job("project_delete", project["name"], None, project_id,
+                   lambda progress: services().delete_project(project_id, progress))
 
-        def work(progress: Callable[[str, float], None]) -> None:
-            progress("deleting project", 0.2)
-            pipeline = get_pipeline()
-            delete_project(state["store"], state["metadata"], project_id,
-                           getattr(pipeline, "upload_dir", UPLOAD_DIR), getattr(pipeline, "image_dir", IMAGE_DIR))
-            with state["services_lock"]:
-                state["services"].pop(project_id, None)
+    @app.post("/api/projects/{project_id}/rebuild")
+    def rebuild_project(project_id: str) -> dict[str, Any]:
+        """Rebuild one project's graph, index and governance from stored extractions (no model calls)."""
+        project = call(lambda: services().project(project_id))
+        return job("rebuild", project["name"], None, project_id, lambda progress: services().rebuild(project_id, progress))
 
-        return state["jobs"].submit(project["name"], None, work, kind="project_delete", project_id=project_id)
+    @app.post("/api/projects/{project_id}/validate")
+    def validate_endpoint(project_id: str, source: str | None = None) -> list[dict[str, Any]]:
+        return call(lambda: services().validate(project_id, source))
+
+    @app.get("/api/projects/{project_id}/stages")
+    def stages(project_id: str) -> dict[str, Any]:
+        return call(lambda: services().stage_status(project_id))
 
     # ------------------------------------------------------------------ documents
     @app.get("/api/stats")
     def stats(project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        return service(check_project(project)).stats()
+        return retriever(project).stats()
 
     @app.get("/api/documents")
     def documents(project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
-        check_project(project)
-        store_ = state["store"]
-        rows = []
-        known = set()
-        for document in store_.documents.find(project_filter(project), {"filename": 1, "page_count": 1, "sources": 1}):
-            known.add(document["_id"])
-            meta = state["metadata"].get(document["_id"])
-            pages = store_.content_units.count_documents({"document_id": document["_id"], "unit_type": "page"})
-            job = state["jobs"].for_document(document["_id"])
-            status = job["status"] if job and job["status"] in ("queued", "running", "failed") else (
-                "processed" if pages == document.get("page_count") else "incomplete")
-            rows.append({
-                "id": document["_id"], "filename": document["filename"], "pages": document.get("page_count", 0),
-                "images": store_.content_units.count_documents({"document_id": document["_id"], "unit_type": "image"}),
-                "concepts": store_.concepts.count_documents({"document_ids": document["_id"]}),
-                "title": meta.get("title"), "author": meta.get("author"), "year": meta.get("year"),
-                "detected_from": meta.get("detected_from", {}), "user_edited": meta.get("user_edited", []),
-                "sources": document.get("sources", []),
-                "status": status, "stage": job["stage"] if job else None,
-                "progress": job["progress"] if job else 1.0, "error": job["error"] if job else None,
-            })
-        for job in state["jobs"].jobs.values():
+        rows = call(lambda: services().list_documents(project, state["jobs"].for_document))
+        known = {row["id"] for row in rows}
+        for queued in state["jobs"].jobs.values():
             # Uploads that are still being processed are shown before their document exists.
-            if job["kind"] == "upload" and job.get("project_id") == project and job["document_id"] not in known \
-                    and job["status"] != "done":
-                rows.append({"id": job["document_id"], "filename": job["filename"], "pages": 0, "images": 0,
+            if queued["kind"] == "upload" and queued.get("project_id") == project and queued["document_id"] not in known \
+                    and queued["status"] != "done":
+                rows.append({"id": queued["document_id"], "filename": queued["filename"], "pages": 0, "images": 0,
                              "concepts": 0, "title": None, "author": None, "year": None, "detected_from": {},
-                             "user_edited": [], "sources": [], "status": job["status"], "stage": job["stage"],
-                             "progress": job["progress"], "error": job["error"]})
+                             "user_edited": [], "sources": [], "structure": None, "status": queued["status"],
+                             "stage": queued["stage"], "progress": queued["progress"], "error": queued["error"]})
         return rows
 
     @app.put("/api/documents/{document_id}/metadata")
     def update_metadata(document_id: str, body: MetadataUpdate, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        require_document(document_id, check_project(project))
-        changes = {key: value for key, value in body.model_dump().items() if value is not None}
-        return state["metadata"].update(document_id, changes)
+        return call(lambda: services().update_metadata(project, document_id, body.model_dump()))
+
+    @app.get("/api/documents/{document_id}/versions")
+    def versions(document_id: str, project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().document_versions(project, document_id))
+
+    @app.post("/api/documents/{document_id}/structure")
+    def structure(document_id: str, project: str = Query(DEFAULT_PROJECT),
+                  parser: str | None = Query(None, pattern="^(auto|docling|pymupdf)$")) -> dict[str, Any]:
+        """Parse sections, tables, figures and equations (background job; stored page text is unchanged)."""
+        document = call(lambda: services().document(project, document_id))
+        return job("structure", document["filename"], document_id, project,
+                   lambda progress: services().parse_structure(project, document_id, parser))
 
     @app.post("/api/documents/upload")
     async def upload(file: UploadFile = File(...), project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
         """Add a document to the project."""
-        check_project(project)
+        call(lambda: services().project(project))
         temp_dir, temp_path, filename, sha = await save_upload(file)
-        return run_job("upload", filename, document_id_for(project, sha),
-                       lambda pipeline, progress: pipeline.ingest_file(temp_path, filename, progress,
-                                                                       project_id=project),
-                       project, temp_dir)
+        return job("upload", filename, services().upload_document_id(project, sha), project,
+                   lambda progress: services().ingest(project, temp_path, filename, progress), temp_dir)
 
     @app.put("/api/documents/{document_id}/file")
     async def replace_file(document_id: str, file: UploadFile = File(...),
                            project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
         """Edit a document by uploading a new version of its PDF; it stays in its project, metadata edits carry over."""
-        require_document(document_id, check_project(project))
+        call(lambda: services().document(project, document_id))
         temp_dir, temp_path, filename, _ = await save_upload(file)
-        return run_job("replace", filename, document_id,
-                       lambda pipeline, progress: pipeline.replace(document_id, temp_path, filename, progress),
-                       project, temp_dir)
+        return job("replace", filename, document_id, project,
+                   lambda progress: services().replace(project, document_id, temp_path, filename, progress), temp_dir)
 
     @app.delete("/api/documents/{document_id}")
     def delete_document(document_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
         """Delete a document and everything derived from it, then rebuild that project's concepts, edges and index."""
-        document = require_document(document_id, check_project(project))
-        return run_job("delete", document["filename"], document_id,
-                       lambda pipeline, progress: pipeline.delete(document_id, progress), project)
+        document = call(lambda: services().document(project, document_id))
+        return job("delete", document["filename"], document_id, project,
+                   lambda progress: services().delete_document(project, document_id, progress))
 
     @app.get("/api/watch")
     def watch_status() -> dict[str, Any]:
@@ -370,23 +362,37 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
 
     @app.get("/api/jobs")
     def jobs() -> list[dict[str, Any]]:
-        return sorted(state["jobs"].jobs.values(), key=lambda job: -job["created_at"])
+        return sorted(state["jobs"].jobs.values(), key=lambda item: -item["created_at"])
 
     @app.get("/api/jobs/{job_id}")
-    def job(job_id: str) -> dict[str, Any]:
+    def job_status(job_id: str) -> dict[str, Any]:
         if job_id not in state["jobs"].jobs:
             raise HTTPException(404, "Unknown job")
         return state["jobs"].jobs[job_id]
 
+    # ------------------------------------------------------------------ knowledge governance
+    @app.get("/api/knowledge/summary")
+    def knowledge_summary(project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().knowledge_summary(project))
+
+    @app.get("/api/knowledge/{item_id}/validation")
+    def validation(item_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().validation_record(project, item_id))
+
+    @app.post("/api/knowledge/{item_id}/adjudicate")
+    def adjudicate(item_id: str, body: AdjudicationBody, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().adjudicate(project, item_id, body.reviewer, body.decision, body.note))
+
+    # ------------------------------------------------------------------ retrieval
     @app.get("/api/concepts/autocomplete")
     def autocomplete(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50),
                      project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
-        return service(check_project(project)).autocomplete(q, limit)
+        return retriever(project).autocomplete(q, limit)
 
     @app.get("/api/concepts/search")
     def concept_search(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=100),
                        project: str = Query(DEFAULT_PROJECT)) -> list[dict]:
-        svc = service(check_project(project))
+        svc = retriever(project)
         found = [svc.concept_summary(concept_id) for concept_id in svc.match_concepts(q)]
         ids = {item["id"] for item in found}
         found += [item for item in svc.autocomplete(q, limit) if item["id"] not in ids]
@@ -394,7 +400,7 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
 
     @app.get("/api/concepts/{concept_id}")
     def concept(concept_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        detail = service(check_project(project)).concept_detail(concept_id)   # None for other projects' concepts
+        detail = retriever(project).concept_detail(concept_id)   # None for other projects' concepts
         if detail is None:
             raise HTTPException(404, "Unknown concept")
         return detail
@@ -402,26 +408,28 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
     @app.get("/api/graph")
     def graph(document_id: str | None = None, type: str | None = None,
               min_weight: float = Query(0.0, ge=0), limit: int = Query(250, ge=1, le=3000),
-              focus: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        return service(check_project(project)).graph_payload(document_id or None, type or None, min_weight, limit,
-                                                             focus)
+              focus: str | None = None, source: str | None = None,
+              project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        """The map: ``source`` gliner (default, as before) or concept_first (governed concepts and claims)."""
+        return call(lambda: services().graph_payload(project, source or "gliner", document_id or None, type or None,
+                                                     min_weight, limit, focus))
 
     @app.get("/api/search")
     def search(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50),
                document_id: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        return service(check_project(project)).search(q, limit, document_id or None)
+        return retriever(project).search(q, limit, document_id or None)
 
     @app.post("/api/ask")
     def ask(body: AskRequest, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        check_project(project)
+        svc = retriever(project)
         question = body.question.strip()
         if not question:
             raise HTTPException(400, "Question is empty")
-        return service(project).ask(question)
+        return svc.ask(question)
 
     @app.get("/api/pages/{unit_id}")
     def page(unit_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
-        svc = service(check_project(project))
+        svc = retriever(project)
         record = svc.pages.get(unit_id)          # only this project's pages are loaded
         if record is None:
             raise HTTPException(404, "Unknown page")
@@ -430,15 +438,11 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
     @app.get("/api/pages/{unit_id}/image")
     def page_image(unit_id: str, quote: str | None = None, zoom: float = Query(1.6, ge=0.5, le=4.0),
                    project: str = Query(DEFAULT_PROJECT)) -> Response:
-        record = service(check_project(project)).pages.get(unit_id)
-        if record is None or fitz is None:
+        if fitz is None:
             raise HTTPException(404, "Unknown page")
-        document = state["store"].documents.find_one({"_id": record["document_id"]}, {"file_storage": 1})
-        path = PROJECT_ROOT / document["file_storage"]["uri"] if document else None
-        if path is None or not path.is_file():
-            raise HTTPException(404, "Source PDF not found")
+        path, page_number = call(lambda: services().page_source(project, unit_id))
         with fitz.open(path) as pdf:
-            pdf_page = pdf[record["page_number"] - 1]
+            pdf_page = pdf[page_number - 1]
             if quote:
                 for rect in _highlight_rects(pdf_page, quote):
                     pdf_page.add_highlight_annot(rect)
@@ -447,12 +451,132 @@ def create_app(store: MongoKnowledgeStore | None = None, metadata: MetadataStore
 
     @app.get("/api/images/{unit_id}")
     def image(unit_id: str, project: str = Query(DEFAULT_PROJECT)) -> FileResponse:
-        unit = state["store"].content_units.find_one(
-            {"_id": unit_id, "unit_type": "image", **project_filter(check_project(project))}, {"image_uri": 1})
-        path = PROJECT_ROOT / unit["image_uri"] if unit and unit.get("image_uri") else None
-        if path is None or not path.is_file():
-            raise HTTPException(404, "Unknown image")
-        return FileResponse(path)
+        return FileResponse(call(lambda: services().image_file(project, unit_id)))
+
+    # ------------------------------------------------------------------ hybrid retrieval and reasoning
+    @app.get("/api/projects/{project_id}/context")
+    def project_context(project_id: str) -> dict[str, Any]:
+        return call(lambda: services().project_context(project_id))
+
+    @app.get("/api/search/hybrid")
+    def hybrid_search(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50),
+                      source: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().search_hybrid(project, q.strip(), limit, source))
+
+    @app.post("/api/research")
+    def research(body: AskRequest, source: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        question = body.question.strip()
+        if not question:
+            raise HTTPException(400, "Question is empty")
+        return call(lambda: services().research(project, question, source))
+
+    @app.post("/api/projects/{project_id}/semantic-index")
+    def semantic_index(project_id: str) -> dict[str, Any]:
+        """Embed the project's passages with the local embedding model (background job)."""
+        project = call(lambda: services().project(project_id))
+        return job("semantic_index", project["name"], None, project_id,
+                   lambda progress: services().build_semantic_index(project_id))
+
+    @app.post("/api/projects/{project_id}/concept-graph")
+    def concept_graph(project_id: str) -> dict[str, Any]:
+        """Rebuild the concept-first graph from stored extractions and proposals (no model call)."""
+        project = call(lambda: services().project(project_id))
+        return job("concept_graph", project["name"], None, project_id,
+                   lambda progress: services().rebuild_concept_graph(project_id))
+
+    # ------------------------------------------------------------------ knowledge exploration
+    @app.get("/api/knowledge/concepts")
+    def knowledge_concepts(q: str = Query(..., min_length=1), source: str | None = None,
+                           project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().find_concepts(project, q, source))
+
+    @app.get("/api/knowledge/concepts/{concept_id}")
+    def knowledge_concept(concept_id: str, source: str | None = None,
+                          project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().concept_knowledge(project, concept_id, source))
+
+    @app.get("/api/knowledge/graph/explore")
+    def explore(concept: list[str] = Query(...), hops: int = Query(1, ge=1, le=3), source: str | None = None,
+                project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().explore(project, concept, hops, source))
+
+    @app.get("/api/knowledge/graph/path")
+    def path(a: str, b: str, source: str | None = None, max_hops: int = Query(4, ge=1, le=6),
+             project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().connection(project, a, b, source, max_hops))
+
+    @app.get("/api/knowledge/claims")
+    def claims(concept: str | None = None, kind: str | None = None, modality: str | None = None,
+               project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().claims(project, concept, kind, modality))
+
+    @app.get("/api/knowledge/conflicts")
+    def conflicts(source: str | None = None, project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().conflicts(project, source))
+
+    @app.get("/api/knowledge/items/{item_id}/evidence")
+    def item_evidence(item_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().evidence(project, item_id))
+
+    # ------------------------------------------------------------------ governance and review
+    @app.get("/api/knowledge/review")
+    def review_queue(project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().review_queue(project))
+
+    @app.post("/api/knowledge/{item_id}/revoke")
+    def revoke(item_id: str, body: ReviewerNote, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().revoke_adjudication(project, item_id, body.reviewer, body.note))
+
+    @app.get("/api/knowledge/merges")
+    def merges(project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().merge_decisions(project))
+
+    @app.post("/api/knowledge/merges")
+    def merge(body: MergeBody, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().review_merge(project, body.a, body.b, body.decision, body.reviewer, body.note))
+
+    @app.post("/api/knowledge/merges/{decision_id}/revert")
+    def revert_merge(decision_id: str, body: ReviewerNote, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().revert_merge(project, decision_id, body.reviewer, body.note))
+
+    @app.get("/api/ontology")
+    def ontology(project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().ontology(project))
+
+    @app.post("/api/ontology")
+    def extend_ontology(body: OntologyBody, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().extend_ontology(project, body.types, body.actor))
+
+    @app.get("/api/proposals")
+    def proposals(status: str | None = None, agent: str | None = None,
+                  project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().proposals(project, status, agent))
+
+    @app.post("/api/proposals")
+    def propose(body: ProposalBody, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().propose(project, body.agent, body.kind, body.unit_id, body.data))
+
+    @app.post("/api/proposals/{proposal_id}/withdraw")
+    def withdraw(proposal_id: str, body: ReviewerNote, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().withdraw_proposal(project, proposal_id, body.reviewer))
+
+    @app.get("/api/history")
+    def history(item: str | None = None, actor: str | None = None, limit: int = Query(100, ge=1, le=1000),
+                project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().history(project, item, actor, limit))
+
+    @app.get("/api/projects/{project_id}/diagnostics")
+    def diagnostics(project_id: str, probe_models: bool = False) -> dict[str, Any]:
+        return call(lambda: services().diagnostics(project_id, probe_models))
+
+    @app.get("/api/agents/activity")
+    def agent_activity(agent: str | None = None, limit: int = Query(100, ge=1, le=1000),
+                       project: str = Query(DEFAULT_PROJECT)) -> list[dict[str, Any]]:
+        return call(lambda: services().agent_activity(project, agent, limit))
+
+    @app.get("/api/documents/{document_id}/quality")
+    def document_quality(document_id: str, project: str = Query(DEFAULT_PROJECT)) -> dict[str, Any]:
+        return call(lambda: services().document_quality(project, document_id))
 
     return app
 

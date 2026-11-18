@@ -95,7 +95,17 @@ button:disabled { opacity: .55; cursor: default; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { display: inline-block; padding: 3px 10px; border-radius: 999px; background: var(--surface-2); font-size: 12px; border: 0; }
 button.chip:hover { background: var(--accent-soft); color: var(--accent); }
-.type-chip { background: var(--accent-soft); color: var(--accent); }
+/* Knowledge type colours: values come only from types.js (CSS variables set per element); the
+   fallback below is used before the script runs. */
+.type-badge { --type-bg: var(--surface-2); --type-fg: var(--muted); background: var(--type-bg); color: var(--type-fg); box-shadow: inset 0 0 0 1px var(--type-border, transparent); font-weight: 500; }
+.type-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--type-color); box-shadow: 0 0 0 1px var(--type-border); margin-right: 6px; vertical-align: 0; flex: none; }
+.type-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; list-style: none; margin: 10px 0 0; padding: 0; font-size: 12px; color: var(--muted); }
+.type-legend li { display: flex; align-items: center; gap: 6px; }
+.type-swatch { width: 11px; height: 11px; border-radius: 50%; background: var(--type-color); box-shadow: 0 0 0 1px var(--type-border); }
+.toolbar select.type-select { background: var(--type-bg); color: var(--type-fg); border-color: var(--type-border); box-shadow: inset 3px 0 0 var(--type-color); }
+.suggestions .type-badge { font-size: 11px; padding: 1px 8px; }
+.status-chip.status-verified, .status-chip.status-corroborated, .status-chip.status-adjudicated { background: var(--ok-soft); color: var(--ok); }
+.status-chip.status-needs_review, .status-chip.status-rejected { background: var(--warn-soft); color: var(--warn); }
 .quote { margin: 0 0 6px; padding: 8px 10px; border-left: 3px solid var(--accent); background: #fbfaf7; border-radius: 0 6px 6px 0; line-height: 1.5; }
 .citation { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font-size: 12px; text-align: left; text-decoration: underline dotted; }
 .citation:hover { text-decoration: underline; }
@@ -135,3 +145,18 @@ mark { background: var(--mark); border-radius: 3px; padding: 0 1px; }
   #cy { height: 60vh; }
   .panel { max-height: none; }
 }
+
+/* Knowledge Sphere: overview, review, research */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line, #ddd); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; }
+.card strong { font-size: 1.6rem; }
+.card span { color: var(--muted, #666); font-size: 0.85rem; }
+.card.warn, .answer-card.warn { border-left: 4px solid #b45309; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.review-list li { padding: 10px 0; border-bottom: 1px solid var(--line, #eee); }
+.row-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.claims li { margin-bottom: 10px; }
+.chip.uncertain { font-style: italic; }
+.conflict { color: #92400e; font-size: 0.9rem; }
+table.mini { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+table.mini th, table.mini td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line, #eee); }

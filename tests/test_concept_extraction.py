@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from conftest import FakeGliner, insert_pages, page_id
 
-from src.knowledge.concept_extraction import GlinerExtractor, chunk_text_by_words, extract_concepts, is_noise
+from src.knowledge_extraction.gliner_concepts import extract_concepts, is_noise
+from src.model_runtime.gliner import GlinerExtractor, chunk_text_by_words
 
 
 def _extract(store, model=None):

@@ -1,0 +1,265 @@
+"""Document lifecycle: add (ingest), replace with a new version, and delete with all derived data.
+
+A document is identified by the SHA-256 of its PDF bytes. When that hash is
+already stored with all its pages, extraction and ingestion are skipped.
+Uploaded and watched files are copied to ``data/uploads/<hash prefix>/``;
+``data/raw_pdfs`` is only read, never changed or deleted.
+
+Each document lists its ``sources`` (for example ``upload``, ``raw_pdfs/book1.pdf``,
+``watch:report.pdf``). A document deleted in the app gets a tombstone in
+``deleted_documents`` so that ``pipeline run`` and the folder watcher do not add
+the same file back. Adding the file again on purpose (upload) removes the tombstone.
+"""
+
+from __future__ import annotations
+
+import logging
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from src.document_intelligence import pdf_extraction, text_formats
+from src.config import IMAGE_DIR, UPLOAD_DIR
+from src.contracts.interfaces import Captioner
+from src.document_intelligence.images import extract_images
+from src.knowledge_repository.metadata import MetadataStore, detect_metadata
+from src.knowledge_repository.projects import DEFAULT_PROJECT, ProjectStore, document_id_for, is_default
+from src.knowledge_repository.mongodb_store import MongoKnowledgeStore, sha256_file
+
+logger = logging.getLogger("knowledge_map.ingest")
+Progress = Callable[[str, float], None]
+TOMBSTONES = "deleted_documents"
+
+# Collections whose records belong to one document (field that holds the document ID).
+_DOCUMENT_SCOPED = (
+    ("content_units", "document_id"),
+    ("assets", "document_id"),
+    ("extraction_state", "document_id"),
+    ("concept_mentions", "document_id"),
+    ("page_terms", "document_id"),
+    ("image_state", "_id"),
+)
+
+
+def _noop(stage: str, fraction: float) -> None:
+    return None
+
+
+def is_ingested(store: MongoKnowledgeStore, document_id: str) -> bool:
+    document = store.documents.find_one({"_id": document_id}, {"page_count": 1})
+    if not document:
+        return False
+    pages = store.content_units.count_documents({"document_id": document_id, "unit_type": "page"})
+    return pages > 0 and pages == document.get("page_count")
+
+
+def is_tombstoned(store: MongoKnowledgeStore, document_id: str) -> bool:
+    return store.database[TOMBSTONES].find_one({"_id": document_id}, {"_id": 1}) is not None
+
+
+def stage_upload(source: Path, filename: str, upload_root: Path = UPLOAD_DIR,
+                 project_id: str = DEFAULT_PROJECT) -> tuple[Path, str]:
+    """Copy a file into its own folder named by its document ID. Returns (pdf path, document id)."""
+    document_id = document_id_for(project_id, sha256_file(source))
+    folder = upload_root / document_id[:16]
+    folder.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(filename).name or "document.pdf"
+    if not safe_name.lower().endswith(".pdf") and not text_formats.supported(Path(safe_name)):
+        safe_name += ".pdf"
+    target = folder / safe_name
+    if not target.exists():
+        shutil.copyfile(source, target)
+    return target, document_id
+
+
+def ingest_pdf(
+    store: MongoKnowledgeStore,
+    metadata: MetadataStore,
+    pdf_path: Path,
+    extracted_dir: Path,
+    image_root: Path = IMAGE_DIR,
+    captioner: Captioner | None = None,
+    progress: Progress = _noop,
+    source: str = "upload",
+    project_id: str = DEFAULT_PROJECT,
+) -> dict[str, Any]:
+    """Extract (only if needed), store pages, detect metadata, and extract images for one PDF in one project."""
+    document_id = document_id_for(project_id, sha256_file(pdf_path))
+    result: dict[str, Any] = {"document_id": document_id, "filename": pdf_path.name, "project_id": project_id}
+    if is_ingested(store, document_id):
+        result["pages"] = "unchanged"
+    else:
+        sidecar = extracted_dir / f"{pdf_path.stem}.pages.jsonl"
+        if not sidecar.is_file():
+            progress("extracting text", 0.05)
+            pdf_extraction.run(pdf_path.parent, extracted_dir)
+        progress("storing pages", 0.3)
+        result["pages"] = store.ingest_extracted_directory(
+            extracted_dir, pdf_path.parent, only_stems={pdf_path.stem}, project_id=project_id,
+            document_id_for=lambda sha: document_id_for(project_id, sha))["content_units"]
+    store.documents.update_one({"_id": document_id}, {"$addToSet": {"sources": source}})
+    store.database[TOMBSTONES].delete_one({"_id": document_id})
+    if not metadata.get(document_id):
+        progress("detecting metadata", 0.35)
+        metadata.record_detection(document_id, pdf_path.name, detect_metadata(pdf_path))
+    progress("extracting images", 0.4)
+    result["images"] = extract_images(store, document_id, pdf_path, image_root, captioner, project_id)
+    return result
+
+
+ACCEPTED_FORMATS = "PDF, DOCX, HTML, Markdown"
+
+
+def accepted_name(filename: str) -> bool:
+    return Path(filename).suffix.lower() == ".pdf" or text_formats.supported(Path(filename))
+
+
+def upload_problem(path: Path) -> str | None:
+    """Why an uploaded file cannot be ingested (its content does not match its type), or None."""
+    suffix = path.suffix.lower()
+    if not accepted_name(path.name):
+        return f"Accepted files: {ACCEPTED_FORMATS}"
+    head = path.read_bytes()[:4096]
+    if suffix == ".pdf":
+        valid = head.startswith(b"%PDF-")
+    elif suffix == ".docx":
+        valid = head.startswith(b"PK\x03\x04")
+    else:                                          # HTML and Markdown must be text
+        try:
+            head.decode("utf-8")
+            valid = b"\x00" not in head
+        except UnicodeDecodeError:
+            valid = False
+    return None if valid else f"The file is not a valid {suffix.lstrip('.').upper()} file"
+
+
+def ingest_text_file(
+    store: MongoKnowledgeStore,
+    metadata: MetadataStore,
+    path: Path,
+    extracted_dir: Path,
+    source: str = "upload",
+    project_id: str = DEFAULT_PROJECT,
+) -> dict[str, Any]:
+    """Add a DOCX, HTML or Markdown file: logical pages through the same sidecar and storage as a PDF."""
+    document_id = document_id_for(project_id, sha256_file(path))
+    result: dict[str, Any] = {"document_id": document_id, "filename": path.name, "project_id": project_id,
+                              "images": 0}
+    parsed = text_formats.read(path)
+    if is_ingested(store, document_id):
+        result["pages"] = "unchanged"
+    else:
+        text_formats.write_sidecar(parsed, extracted_dir, path.stem)
+        result["pages"] = store.ingest_extracted_directory(
+            extracted_dir, path.parent, only_stems={path.stem}, project_id=project_id,
+            document_id_for=lambda sha: document_id_for(project_id, sha))["content_units"]
+    store.documents.update_one({"_id": document_id}, {"$addToSet": {"sources": source},
+                                                      "$set": {"format": parsed.format}})
+    store.database[TOMBSTONES].delete_one({"_id": document_id})
+    if not metadata.get(document_id):
+        metadata.record_detection(document_id, path.name, {
+            "title": parsed.title, "author": None, "year": None,
+            "detected_from": {"title": f"{parsed.format} metadata"} if parsed.title else {}})
+    result["warnings"] = parsed.warnings
+    return result
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def delete_document(
+    store: MongoKnowledgeStore,
+    metadata: MetadataStore | None,
+    document_id: str,
+    upload_root: Path = UPLOAD_DIR,
+    image_root: Path = IMAGE_DIR,
+    tombstone: bool = True,
+) -> dict[str, Any]:
+    """Remove a document and everything derived from it. Files in data/raw_pdfs are never touched.
+
+    Concept nodes, relationships and the search index are rebuilt afterwards by the
+    knowledge stages (merge, relations, index), which drop anything that lost its source.
+    """
+    document = store.documents.find_one({"_id": document_id})
+    if document is None:
+        return {"document_id": document_id, "deleted": False}
+    removed: dict[str, int] = {}
+    for collection, field in _DOCUMENT_SCOPED:
+        removed[collection] = store.database[collection].delete_many({field: document_id}).deleted_count
+    store.documents.delete_one({"_id": document_id})
+    # A replaced version keeps its history record (it has ``superseded_by``); a deleted document does not.
+    removed["document_versions"] = store.database["document_versions"].delete_many(
+        {"document_id": document_id, "superseded_by": None}).deleted_count
+    if tombstone:
+        store.database[TOMBSTONES].update_one(
+            {"_id": document_id},
+            {"$set": {"filename": document.get("filename"), "deleted_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+    for folder in (upload_root / document_id[:16], image_root / document_id[:16]):
+        if folder.is_dir() and (_inside(folder, upload_root) or _inside(folder, image_root)):
+            shutil.rmtree(folder, ignore_errors=True)
+    if metadata is not None:
+        metadata.remove(document_id)
+    logger.info("deleted document %s (%s): %s", document_id, document.get("filename"), removed)
+    return {"document_id": document_id, "filename": document.get("filename"), "deleted": True, "removed": removed}
+
+
+def remove_source(
+    store: MongoKnowledgeStore,
+    metadata: MetadataStore | None,
+    document_id: str,
+    source: str,
+    upload_root: Path = UPLOAD_DIR,
+    image_root: Path = IMAGE_DIR,
+) -> dict[str, Any]:
+    """Forget one source of a document; delete the document when no source is left."""
+    store.documents.update_one({"_id": document_id}, {"$pull": {"sources": source}})
+    document = store.documents.find_one({"_id": document_id}, {"sources": 1})
+    if document is None:
+        return {"document_id": document_id, "deleted": False}
+    if document.get("sources"):
+        return {"document_id": document_id, "deleted": False, "remaining_sources": document["sources"]}
+    return delete_document(store, metadata, document_id, upload_root, image_root, tombstone=False)
+
+
+# Project-level records that are not tied to one document (rebuilt per project by the knowledge stages).
+_PROJECT_DERIVED = ("concepts", "concept_aliases", "relationships", "search_index", "search_meta",
+                    "kg_concepts", "kg_relationships", "deleted_documents", "watched_files", "concept_mentions",
+                    "extraction_state", "page_terms", "content_units", "assets", "image_state",
+                    "kg_claims", "document_versions", "validation_records", "adjudications", "stage_runs",
+                    "kg_resolutions", "decision_history", "ontologies", "proposals", "agent_activity",
+                    "semantic_index")
+
+
+def delete_project(
+    store: MongoKnowledgeStore,
+    metadata: MetadataStore | None,
+    project_id: str,
+    upload_root: Path = UPLOAD_DIR,
+    image_root: Path = IMAGE_DIR,
+) -> dict[str, Any]:
+    """Delete one project: its documents (with their files and derived records) and its graph.
+
+    Only records whose ``project_id`` is exactly this project are touched. The default project
+    cannot be deleted. Files in data/raw_pdfs are never touched.
+    """
+    projects = ProjectStore(store.database)
+    project = projects.get(project_id)
+    if is_default(project_id):
+        projects.remove_record(project_id)   # raises: the default project is protected
+    documents = [document["_id"] for document in store.documents.find({"project_id": project_id}, {"_id": 1})]
+    for document_id in documents:
+        delete_document(store, metadata, document_id, upload_root, image_root, tombstone=False)
+    removed = {name: store.database[name].delete_many({"project_id": project_id}).deleted_count
+               for name in _PROJECT_DERIVED}
+    projects.remove_record(project_id)
+    logger.info("deleted project %s (%s): %d documents, %s", project_id, project["name"], len(documents), removed)
+    return {"project_id": project_id, "name": project["name"], "documents_deleted": len(documents),
+            "records_removed": removed}

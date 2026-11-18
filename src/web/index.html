@@ -28,29 +28,40 @@
       <p id="project-message" class="small muted"></p>
     </div>
     <nav>
+      <a href="#overview" data-screen="overview" class="nav-link">Overview</a>
       <a href="#documents" data-screen="documents" class="nav-link">Documents</a>
       <a href="#map" data-screen="map" class="nav-link">Knowledge Map</a>
-      <a href="#ask" data-screen="ask" class="nav-link">Ask Questions</a>
+      <a href="#ask" data-screen="ask" class="nav-link">Research</a>
+      <a href="#review" data-screen="review" class="nav-link">Review</a>
     </nav>
     <div class="sidebar-stats" id="stats"></div>
   </aside>
 
   <main>
+    <!-- 0. Overview -->
+    <section id="screen-overview" class="screen">
+      <header class="screen-head">
+        <h1>Project overview <button type="button" id="refresh-overview" class="small">Refresh</button></h1>
+        <p>What this project knows, how much of it is confirmed, what waits for review, and what agents did.</p>
+      </header>
+      <div id="overview"></div>
+    </section>
+
     <!-- 1. Documents -->
-    <section id="screen-documents" class="screen">
+    <section id="screen-documents" class="screen" hidden>
       <header class="screen-head">
         <h1>Document upload</h1>
         <p>Upload and manage your documents. Citation metadata can be corrected here.</p>
       </header>
       <label id="dropzone" class="dropzone" for="file-input">
-        <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden>
+        <input id="file-input" type="file" accept="application/pdf,.pdf,.docx,.html,.htm,.md,.markdown" multiple hidden>
         <span class="drop-icon">⇪</span>
-        <strong>Drag and drop PDF files here</strong>
+        <strong>Drag and drop PDF, DOCX, HTML or Markdown files here</strong>
         <span>or click to upload</span>
       </label>
       <p id="watch-status" class="muted small"></p>
       <div id="upload-message" class="notice" hidden></div>
-      <input id="replace-input" type="file" accept="application/pdf,.pdf" hidden>
+      <input id="replace-input" type="file" accept="application/pdf,.pdf,.docx,.html,.htm,.md,.markdown" hidden>
       <div class="table-wrap">
         <table class="doc-table">
           <thead>
@@ -66,13 +77,17 @@
     <section id="screen-map" class="screen" hidden>
       <header class="screen-head">
         <h1>Interactive knowledge map</h1>
-        <p>Explore connected concepts. Node size shows importance, color shows community.</p>
+        <p>Explore connected concepts. Node size shows importance, color shows concept type.</p>
       </header>
       <div class="toolbar">
         <div class="search-box">
           <input id="concept-search" type="search" placeholder="Search concepts…" autocomplete="off">
           <ul id="suggestions" class="suggestions" hidden></ul>
         </div>
+        <select id="filter-source" title="Which graph to show">
+          <option value="gliner">Extracted mentions</option>
+          <option value="concept_first">Governed concepts</option>
+        </select>
         <select id="filter-document"><option value="">All documents</option></select>
         <select id="filter-type"><option value="">All types</option></select>
         <label class="range">Min edge weight <input id="filter-weight" type="range" min="0" max="10" step="0.5" value="1"><span id="weight-value">1</span></label>
@@ -89,14 +104,17 @@
           <p class="muted">Click a concept to see its description, aliases, related concepts and sources.</p>
         </aside>
       </div>
+      <div id="type-legend"></div>
       <p id="graph-info" class="muted small"></p>
     </section>
 
     <!-- 3. Ask -->
     <section id="screen-ask" class="screen" hidden>
       <header class="screen-head">
-        <h1>Question answering</h1>
-        <p>Answers are sentences copied from your documents, each with its source. Nothing is generated.</p>
+        <h1>Research assistant</h1>
+        <p>Evidence first: sentences and passages copied from your documents, what the knowledge base says (facts,
+          interpretations, hypotheses, unconfirmed claims), conflicts and unit conversions. Nothing is generated;
+          without evidence there is no answer.</p>
       </header>
       <form id="ask-form" class="ask-form">
         <input id="question" type="text" placeholder="Ask a question about your documents…" autocomplete="off">
@@ -104,6 +122,16 @@
         <button type="button" id="search-button" class="secondary">Search pages</button>
       </form>
       <div id="answer"></div>
+    </section>
+
+    <!-- 4. Review -->
+    <section id="screen-review" class="screen" hidden>
+      <header class="screen-head">
+        <h1>Governance review</h1>
+        <p>Items governance could not accept on its own, possible duplicates, merge decisions (reversible),
+          agent proposals and the decision history. Every decision is recorded with your name.</p>
+      </header>
+      <div id="review"></div>
     </section>
   </main>
 </div>
@@ -127,6 +155,9 @@
 </div>
 
 <script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/types.js"></script>
+<!-- sphere.js defines Sphere, which app.js uses while starting up, so it must load first -->
+<script src="/static/sphere.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

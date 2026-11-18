@@ -27,6 +27,13 @@ networkx==3.7
 snowballstemmer==3.1.1
 tqdm==4.70.1
 
+# Shared contracts (canonical knowledge model)
+pydantic==2.14.1
+
+# Optional structured parser, not installed by default (see docs/ARCHITECTURE.md):
+#   docling   select with KM_PARSER=docling; PyMuPDF is used when it is absent
+# Local models run in Ollama (a separate program), so no Python package is needed for Qwen.
+
 # API
 fastapi==0.159.1
 uvicorn[standard]==0.54.0

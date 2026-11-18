@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src import pdf_extraction
+from src.document_intelligence import pdf_extraction
 
 
 @unittest.skipIf(pdf_extraction.fitz is None, "PyMuPDF is required by the extractor")

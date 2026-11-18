@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from src.export.obsidian_exporter import export_vault
-from src.graph.graph_builder import graph_stats, load_graph
+from src.api.obsidian_exporter import export_vault
+from src.retrieval.graph import graph_stats, load_graph
 
 CITATION = re.compile(r"\[[^|\]]+ \| [^|\]]+ \| [^|\]]+, p\. \d+\]")
 

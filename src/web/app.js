@@ -2,8 +2,7 @@
 "use strict";
 
 const NOT_FOUND = "Not found in the uploaded documents.";
-const PALETTE = ["#9cc9b4", "#f2b8a2", "#a9c4e8", "#f3d48b", "#c8b6e2", "#b9d98f", "#f0a8b9",
-                 "#8fd0d4", "#e3c0a0", "#b8c2cc", "#d9a7d4", "#a3d9a5"];
+const Types = window.KnowledgeTypes;   // the only source of type colours (types.js)
 
 const $ = (selector) => document.querySelector(selector);
 let cy = null;
@@ -54,12 +53,17 @@ function citationButton(citation, unitId, quote) {
 
 // ------------------------------------------------------------------ navigation
 function showScreen(name) {
-  const screens = ["documents", "map", "ask"];
-  if (!screens.includes(name)) name = "documents";
+  const screens = ["overview", "documents", "map", "ask", "review"];
+  if (!screens.includes(name)) name = "overview";
   for (const screen of screens) $(`#screen-${screen}`).hidden = screen !== name;
   document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.screen === name));
   if (name === "map") ensureGraph();
+  if (name === "overview") Sphere.loadOverview();
+  if (name === "review") Sphere.loadReview();
 }
+
+// The map shows one graph: "concept_first" (governed concepts, claims) or "gliner" (extracted mentions).
+const graphSource = () => $("#filter-source").value;
 window.addEventListener("hashchange", () => showScreen(location.hash.slice(1)));
 
 async function loadStats() {
@@ -148,7 +152,10 @@ function notify(message, isError = false) {
 
 async function uploadFiles(files) {
   for (const file of files) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) { notify(`${file.name} is not a PDF.`, true); continue; }
+    if (!/\.(pdf|docx|html?|md|markdown)$/i.test(file.name)) {
+      notify(`${file.name}: accepted files are PDF, DOCX, HTML and Markdown.`, true);
+      continue;
+    }
     const form = new FormData();
     form.append("file", file);
     try {
@@ -229,6 +236,7 @@ function graphQuery(focus) {
   if ($("#filter-document").value) params.set("document_id", $("#filter-document").value);
   if ($("#filter-type").value) params.set("type", $("#filter-type").value);
   if (focus) params.set("focus", focus);
+  params.set("source", graphSource());
   return `/api/graph?${params}`;
 }
 
@@ -237,19 +245,27 @@ async function loadGraph(focus) {
   const typeSelect = $("#filter-type");
   if (typeSelect.options.length <= 1) {
     typeSelect.innerHTML += data.types.map((type) => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`).join("");
+    Types.paintSelect(typeSelect);
+    $("#type-legend").innerHTML = Types.legend(data.types);
   }
   const importances = data.elements.filter((el) => !el.data.source).map((el) => el.data.importance);
   const maxImportance = Math.max(...importances, 1e-9);
   for (const el of data.elements) {
     if (!el.data.source) {
       el.data.size = 18 + 52 * Math.sqrt(el.data.importance / maxImportance);
-      el.data.color = PALETTE[el.data.community % PALETTE.length];
+      const typeStyle = Types.style(el.data.type);
+      el.data.color = typeStyle.color;
+      el.data.border = typeStyle.border;
     }
   }
   cy.elements().remove();
   cy.add(data.elements);
   cy.layout({ name: "cose", animate: false, nodeRepulsion: 9000, idealEdgeLength: 90, randomize: true, fit: true, padding: 30 }).run();
-  $("#graph-info").textContent = `Showing ${data.node_count} of ${data.total_nodes} concepts and ${data.edge_count} of ${data.total_edges} relationships.`;
+  $("#graph-info").textContent = data.total_nodes === 0
+    ? (data.source === "concept_first"
+      ? "The governed graph of this project is empty: no concept-first extraction has run yet (python -m src.api.kg_cli --all). Choose \"Extracted mentions\" to see the GLiNER graph."
+      : "This project has no concepts yet: add documents on the Documents screen.")
+    : `Showing ${data.node_count} of ${data.total_nodes} concepts and ${data.edge_count} of ${data.total_edges} relationships.`;
   if (focus) selectNode(focus);
 }
 
@@ -263,7 +279,7 @@ function ensureGraph() {
       { selector: "node", style: {
         "background-color": "data(color)", width: "data(size)", height: "data(size)", label: "data(label)",
         "font-size": 10, "text-valign": "center", "text-halign": "center", "text-wrap": "wrap", "text-max-width": 90,
-        color: "#1d2b2a", "text-outline-color": "#ffffff", "text-outline-width": 2, "border-width": 1, "border-color": "#ffffff" } },
+        color: "#1d2b2a", "text-outline-color": "#ffffff", "text-outline-width": 2, "border-width": 1.5, "border-color": "data(border)" } },
       { selector: "node:selected", style: { "border-width": 4, "border-color": "#1f4e4a" } },
       { selector: "edge", style: {
         width: "mapData(weight, 0, 15, 1, 6)", "line-color": "#c9c2b6", "curve-style": "haystack", opacity: 0.7 } },
@@ -290,8 +306,9 @@ async function selectNode(conceptId) {
   const panel = $("#panel");
   panel.innerHTML = `<p class="muted">Loading…</p>`;
   try {
-    const concept = await api(`/api/concepts/${encodeURIComponent(conceptId)}`);
-    panel.innerHTML = renderConcept(concept);
+    panel.innerHTML = graphSource() === "concept_first"
+      ? Sphere.renderKnowledgeConcept(await api(`/api/knowledge/concepts/${encodeURIComponent(conceptId)}?source=concept_first`))
+      : renderConcept(await api(`/api/concepts/${encodeURIComponent(conceptId)}`));
   } catch (e) { panel.innerHTML = `<p class="muted">Could not load concept: ${escapeHtml(e.message)}</p>`; }
 }
 
@@ -304,8 +321,8 @@ function renderConcept(concept) {
     : `<p class="muted">None</p>`;
   const related = concept.related.length ? `<ul class="list">${concept.related.map((item) => {
     const evidence = item.evidence[0];
-    return `<li><div class="related-row"><button type="button" class="chip" data-concept="${escapeHtml(item.id)}">${escapeHtml(item.name)}</button>
-      <span class="relation">${escapeHtml(item.relation_type)}${item.direction === "in" && item.relation_type !== "related_to" ? " (inverse)" : ""}, confidence ${item.confidence}</span></div>
+    return `<li><div class="related-row"><button type="button" class="chip" data-concept="${escapeHtml(item.id)}">${Types.dot(item.type)}${escapeHtml(item.name)}</button>
+      <span class="relation">${escapeHtml(item.relation_type)}${item.direction === "in" && item.relation_type !== "related_to" ? " (inverse)" : ""}, ${escapeHtml((item.status || "unvalidated").replace("_", " "))}</span></div>
       ${evidence ? citationButton(evidence.citation, evidence.content_unit_id, evidence.quote) : ""}</li>`;
   }).join("")}</ul>` : `<p class="muted">None</p>`;
   const sources = `<ul class="list">${concept.sources.slice(0, 25).map((source) =>
@@ -313,7 +330,8 @@ function renderConcept(concept) {
   const images = concept.images.length ? `<h3>Images (${concept.images.length})</h3><div class="thumbs">${concept.images.slice(0, 12).map((image) =>
     `<img src="${scoped(`/api/images/${encodeURIComponent(image.id)}`)}" alt="${escapeHtml(image.caption || "Image")}" title="${escapeHtml((image.caption || "Image") + " " + image.citation)}">`).join("")}</div>` : "";
   return `<h2>${escapeHtml(concept.name)}</h2>
-    <span class="chip type-chip">${escapeHtml(concept.type || "concept")}</span>
+    ${Types.badge(concept.type)}
+    <span class="chip status-chip status-${escapeHtml(concept.status || "unvalidated")}" title="${escapeHtml((concept.failed_checks || []).length ? "Checks not passed: " + concept.failed_checks.join(", ") : "Evidence governance status")}">${escapeHtml((concept.status || "unvalidated").replace("_", " "))}</span>
     <span class="muted small"> ${concept.mention_count} mentions on ${concept.page_count} pages</span>
     <h3>Description</h3>${description}
     <h3>Aliases</h3>${aliases}
@@ -338,8 +356,11 @@ function setupMap() {
     const q = input.value.trim();
     if (!q) { close(); return; }
     timer = setTimeout(async () => {
-      try { items = await api(`/api/concepts/autocomplete?q=${encodeURIComponent(q)}&limit=10`); } catch (e) { items = []; }
-      list.innerHTML = items.map((item, index) => `<li data-index="${index}"><span>${escapeHtml(item.name)}</span><span class="muted small">${escapeHtml(item.type || "")}</span></li>`).join("")
+      const path = graphSource() === "concept_first"
+        ? `/api/knowledge/concepts?q=${encodeURIComponent(q)}&source=concept_first`
+        : `/api/concepts/autocomplete?q=${encodeURIComponent(q)}&limit=10`;
+      try { items = (await api(path)).slice(0, 10); } catch (e) { items = []; }
+      list.innerHTML = items.map((item, index) => `<li data-index="${index}"><span>${Types.dot(item.type)}${escapeHtml(item.name)}</span>${item.type ? Types.badge(item.type) : ""}</li>`).join("")
         || `<li class="muted">No matching concept</li>`;
       list.hidden = false;
     }, 150);
@@ -361,8 +382,15 @@ function setupMap() {
   });
   document.addEventListener("click", (event) => { if (!event.target.closest(".search-box")) close(); });
   $("#filter-weight").addEventListener("input", () => { $("#weight-value").textContent = $("#filter-weight").value; });
+  $("#filter-type").addEventListener("change", () => Types.setVars($("#filter-type"), $("#filter-type").value));
   ["#filter-document", "#filter-type", "#filter-weight", "#filter-limit"].forEach((selector) =>
     $(selector).addEventListener("change", () => loadGraph()));
+  $("#filter-source").addEventListener("change", () => {
+    $("#filter-type").innerHTML = `<option value="">All types</option>`;   // each graph has its own types
+    $("#type-legend").innerHTML = "";
+    $("#panel").innerHTML = `<p class="muted">Click a concept to see its evidence, relationships and claims.</p>`;
+    loadGraph().catch((e) => { $("#graph-info").textContent = `Could not load the graph: ${e.message}`; });
+  });
 }
 
 // ------------------------------------------------------------------------- ask
@@ -396,15 +424,15 @@ function setupAsk() {
     if (!question) return;
     answer.innerHTML = `<p class="muted">Searching your documents…</p>`;
     try {
-      const result = await api("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
-      answer.innerHTML = renderAnswer(result);
+      const result = await api("/api/research", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
+      answer.innerHTML = Sphere.renderResearch(result);
     } catch (e) { answer.innerHTML = `<p class="muted">Error: ${escapeHtml(e.message)}</p>`; }
   });
   $("#search-button").addEventListener("click", async () => {
     const q = $("#question").value.trim();
     if (!q) return;
     answer.innerHTML = `<p class="muted">Searching…</p>`;
-    try { answer.innerHTML = renderSearch(await api(`/api/search?q=${encodeURIComponent(q)}&limit=10`)); }
+    try { answer.innerHTML = Sphere.renderHybrid(await api(`/api/search/hybrid?q=${encodeURIComponent(q)}&limit=10`)); }
     catch (e) { answer.innerHTML = `<p class="muted">Error: ${escapeHtml(e.message)}</p>`; }
   });
 }
@@ -439,6 +467,8 @@ document.addEventListener("click", (event) => {
   if (citation) { openPage(citation.dataset.unit, citation.dataset.label, citation.dataset.quote); return; }
   const chip = event.target.closest("[data-concept]");
   if (chip) {
+    const wanted = chip.dataset.concept.startsWith("kg_concept") ? "concept_first" : "gliner";
+    if (graphSource() !== wanted) { $("#filter-source").value = wanted; $("#filter-type").innerHTML = `<option value="">All types</option>`; }
     location.hash = "#map";
     showScreen("map");
     loadGraph(chip.dataset.concept);
@@ -486,6 +516,8 @@ function switchProject(projectId) {
   if (cy) {
     cy.elements().remove();
     $("#filter-type").innerHTML = `<option value="">All types</option>`;
+    Types.paintSelect($("#filter-type"));
+    $("#type-legend").innerHTML = "";
     $("#filter-document").value = "";
   }
   $("#panel").innerHTML = `<p class="muted">Click a concept to see its description, aliases, related concepts and sources.</p>`;
@@ -494,6 +526,8 @@ function switchProject(projectId) {
   loadDocuments();
   loadStats();
   if (!$("#screen-map").hidden && cy) loadGraph().catch(() => {});
+  if (!$("#screen-overview").hidden) Sphere.loadOverview();
+  if (!$("#screen-review").hidden) Sphere.loadReview();
 }
 
 function setupProjects() {
@@ -562,7 +596,8 @@ setupProjects();
 setupDocuments();
 setupMap();
 setupAsk();
+Sphere.setup();
 loadProjects();
 loadDocuments();
 loadStats();
-showScreen(location.hash.slice(1) || "documents");
+showScreen(location.hash.slice(1) || "overview");

@@ -12,7 +12,7 @@ try:
 except ImportError:  # pragma: no cover - actionable test dependency message
     mongomock = None
 
-from src.storage.mongodb_store import MongoKnowledgeStore, stable_id
+from src.knowledge_repository.mongodb_store import MongoKnowledgeStore, stable_id
 
 
 @unittest.skipIf(mongomock is None, "Install requirements-storage-test.txt to run MongoDB storage tests")

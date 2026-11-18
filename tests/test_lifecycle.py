@@ -11,10 +11,10 @@ import fitz
 import pytest
 from conftest import FakeEmbedder, FakeGliner
 
-from src.ingest.watcher import FolderWatcher, process_events
-from src.knowledge.concept_extraction import GlinerExtractor
-from src.pipeline import Pipeline
-from src.storage.mongodb_store import sha256_file
+from src.orchestration.watcher import FolderWatcher, process_events
+from src.model_runtime.gliner import GlinerExtractor
+from src.orchestration.pipeline import Pipeline
+from src.knowledge_repository.mongodb_store import sha256_file
 
 TEXT_A = ("Systems engineering includes risk management for the whole life cycle of the product. "
           "Requirements analysis is a part of systems engineering and starts early in every program. "

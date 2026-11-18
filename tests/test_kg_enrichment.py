@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from conftest import FakeEmbedder
 
-from src.kg.config import EnrichmentConfig
-from src.kg.enrichment import enrich
-from src.storage.mongodb_store import stable_id
+from src.config import EnrichmentConfig
+from src.knowledge_extraction.enrichment import enrich
+from src.knowledge_repository.mongodb_store import stable_id
 from src.textutil import concept_key
 
 CONFIG = EnrichmentConfig()

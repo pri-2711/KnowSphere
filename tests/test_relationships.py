@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from src.knowledge.relationships import _name_pattern, detect_relation, npmi
-from src.storage.mongodb_store import stable_id
+from src.knowledge_extraction.relationships import _name_pattern, detect_relation, npmi
+from src.knowledge_repository.mongodb_store import stable_id
 
 
 def _id(name: str) -> str:
@@ -52,7 +52,7 @@ def test_npmi_bounds() -> None:
 
 
 def test_rebuild_is_idempotent(seeded) -> None:
-    from src.knowledge.relationships import store_relationships
+    from src.knowledge_extraction.relationships import store_relationships
     before = sorted(edge["_id"] for edge in seeded.database["relationships"].find())
     store_relationships(seeded)
     after = sorted(edge["_id"] for edge in seeded.database["relationships"].find())

@@ -1,0 +1,7 @@
+{
+  "default": {"projects": ["default"], "scopes": ["read"]},
+  "agents": {
+    "claude-code": {"projects": ["*"], "scopes": ["read", "propose"]},
+    "codex": {"projects": ["default"], "scopes": ["read"]}
+  }
+}

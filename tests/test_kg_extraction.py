@@ -7,11 +7,11 @@ import json
 import pytest
 from kg_fakes import DOC_X, PAGES, ScriptedLLM, concept, page_id, relation
 
-from src.kg.config import ChunkingConfig
-from src.kg.extraction import EXTRACTED, FAILED, extract_chunk, extraction_is_current
-from src.kg.llm import LLMError, LLMFatalError, LLMResponse
-from src.kg.recovery import parse_output
-from src.kg.segmentation import segment_document
+from src.config import ChunkingConfig
+from src.knowledge_extraction.llm_extraction import EXTRACTED, FAILED, extract_chunk, extraction_is_current
+from src.model_runtime.llm import LLMError, LLMFatalError, LLMResponse
+from src.knowledge_extraction.recovery import parse_output
+from src.document_intelligence.segmentation import segment_document
 
 CONFIG = ChunkingConfig(min_chars=60, target_chars=1000, max_chars=2000)
 

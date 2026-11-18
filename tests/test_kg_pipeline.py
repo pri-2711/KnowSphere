@@ -8,11 +8,11 @@ import pytest
 from conftest import FakeEmbedder
 from kg_fakes import DOC_X, DOC_Y, PAGES, ScriptedLLM, insert_corpus, page_id
 
-from src.ingest.documents import delete_document
-from src.kg.config import ChunkingConfig, KGConfig
-from src.kg.llm import LLMResponse
-from src.kg.orchestrator import KGPipeline
-from src.kg.store import CONCEPTS, RELATIONSHIPS
+from src.orchestration.documents import delete_document
+from src.config import ChunkingConfig, KGConfig
+from src.model_runtime.llm import LLMResponse
+from src.orchestration.kg_pipeline import KGPipeline
+from src.knowledge_repository.kg_store import CONCEPTS, RELATIONSHIPS
 
 CONFIG = KGConfig(chunking=ChunkingConfig(min_chars=60, target_chars=1000, max_chars=2000), max_retries=1)
 
@@ -131,8 +131,8 @@ def test_graph_validation_and_merge_report(corpus, tmp_path) -> None:
 def test_app_lifecycle_delete_also_updates_the_concept_first_graph(corpus, metadata, tmp_path) -> None:
     from conftest import FakeGliner
 
-    from src.knowledge.concept_extraction import GlinerExtractor
-    from src.pipeline import Pipeline
+    from src.model_runtime.gliner import GlinerExtractor
+    from src.orchestration.pipeline import Pipeline
 
     _pipeline(corpus).run([DOC_X, DOC_Y])
     app_pipeline = Pipeline(corpus, metadata, extractor=GlinerExtractor(model=FakeGliner(), threshold=0.5),

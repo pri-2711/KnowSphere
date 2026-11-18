@@ -6,8 +6,8 @@ import csv
 
 from conftest import FakeEmbedder
 
-from src.knowledge.merging import merge_concepts
-from src.storage.mongodb_store import stable_id
+from src.knowledge_extraction.merging import merge_concepts
+from src.knowledge_repository.mongodb_store import stable_id
 
 
 def _mention(store, name, unit, label="process", count=2, forms=None, document_id="doc-a"):

@@ -6,8 +6,8 @@ from collections import Counter
 
 from kg_fakes import DOC_X, PAGES, page_id
 
-from src.kg.config import ChunkingConfig
-from src.kg.segmentation import chunk_offset_to_page, cohesion, is_heading_line, segment_document
+from src.config import ChunkingConfig
+from src.document_intelligence.segmentation import chunk_offset_to_page, cohesion, is_heading_line, segment_document
 
 SMALL = ChunkingConfig(min_chars=60, target_chars=220, max_chars=400, cohesion_threshold=0.08)
 

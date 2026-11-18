@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Sequence
 
-from src.kg.llm import LLMResponse
-from src.storage.mongodb_store import MongoKnowledgeStore, stable_id
+from src.model_runtime.llm import LLMResponse
+from src.knowledge_repository.mongodb_store import MongoKnowledgeStore, stable_id
 
 DOC_X, DOC_Y = "doc-x", "doc-y"
 

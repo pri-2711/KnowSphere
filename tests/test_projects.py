@@ -15,15 +15,15 @@ from kg_fakes import ScriptedLLM
 from test_lifecycle import TEXT_A, TEXT_B, make_pdf
 
 from src.api.app import create_app
-from src.ingest.documents import delete_project
-from src.ingest.watcher import FolderWatcher, process_events
-from src.kg.config import ChunkingConfig, KGConfig
-from src.kg.orchestrator import KGPipeline
-from src.knowledge.concept_extraction import GlinerExtractor
-from src.pipeline import Pipeline
-from src.projects import DEFAULT_PROJECT, ProjectError, ProjectStore, migrate, project_filter
-from src.search.engine import NOT_FOUND, KnowledgeService
-from src.storage.mongodb_store import sha256_file
+from src.orchestration.documents import delete_project
+from src.orchestration.watcher import FolderWatcher, process_events
+from src.config import ChunkingConfig, KGConfig
+from src.orchestration.kg_pipeline import KGPipeline
+from src.model_runtime.gliner import GlinerExtractor
+from src.orchestration.pipeline import Pipeline
+from src.knowledge_repository.projects import DEFAULT_PROJECT, ProjectError, ProjectStore, migrate, project_filter
+from src.retrieval.engine import NOT_FOUND, KnowledgeService
+from src.knowledge_repository.mongodb_store import sha256_file
 
 ONLY_IN_B = ("Verification and validation confirms that the product meets stakeholder needs before delivery. "
              "Verification and validation reviews every test result and every inspection record in detail.")

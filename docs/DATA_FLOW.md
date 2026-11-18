@@ -39,11 +39,13 @@ MongoDB (database `knowledge_map`) is the source of truth. NetworkX only holds a
 | PyMuPDF | Reads the text layer of each page, finds embedded images and their position, renders a page as an image for the viewer, reads PDF metadata. | `content_units`, `assets`, `data/images/` |
 | Tesseract OCR | Used only for pages with little or no text layer but with raster content (scans). | `content_units.text` with `extraction_method: tesseract` |
 | GLiNER (`urchade/gliner_medium-v2.1`) | A small BERT-family model that marks spans in text and gives each a label (for example "process", "method") and a score. Runs locally on CPU. It only points at text that exists on the page; it does not write text. | `concept_mentions` |
+| Ollama with Qwen (`qwen2.5:7b`) and Qwen2.5-VL (`qwen2.5vl:3b`) | Local text and vision models for the optional concept-first stages (concepts, relationships, claims, figures), chosen by `model_runtime/router.py`, one model in memory at a time. Claude is the optional hosted alternative. | candidates on `content_units` |
+| Pydantic | The canonical knowledge model shared by all components (`src/contracts/schemas.py`). | contracts in memory |
 | fastembed (`BAAI/bge-small-en-v1.5`, ONNX) | Turns each concept name into a vector. Used only while merging concepts, never at query time. | used in memory during merging |
 | rapidfuzz | Fast string similarity for catching spelling and OCR variants of the same name. | used in memory during merging |
 | Snowball stemmer | Reduces words to a stem ("requirements" and "required" become "requir") for the keyword index. | `page_terms`, `search_index` |
 | BM25 (own code) | Ranks pages for a keyword query. | in memory at query time |
-| NetworkX | Holds the concept graph, computes degree, PageRank (importance) and Louvain communities (colors). | in memory |
+| NetworkX | Holds the concept graph, computes degree, PageRank (importance) and Louvain communities. Node colours show the concept type, from the single mapping in `src/web/types.js`. | in memory |
 | FastAPI + uvicorn | Serves the JSON API and the web page. | HTTP on port 8000 |
 | Cytoscape.js | Draws the interactive graph in the browser. Stored in `src/web/vendor/`, so it works offline. | browser |
 
@@ -54,12 +56,12 @@ sequenceDiagram
     actor User
     participant UI as Web app or CLI
     participant API as FastAPI job thread
-    participant Ingest as ingest/documents.py
+    participant Ingest as orchestration/documents.py
     participant Ext as pdf_extraction.py
     participant DB as MongoDB
     participant Disk as Disk
 
-    User->>UI: Upload PDF (drag and drop) or run "python -m src.pipeline ingest file.pdf"
+    User->>UI: Upload PDF (drag and drop) or run "python -m src.api.cli ingest file.pdf"
     UI->>API: POST /api/documents/upload
     API->>Disk: copy to data/uploads/<sha256 prefix>/
     API->>Ingest: ingest_pdf()
@@ -207,7 +209,7 @@ flowchart TD
     OUT --> G[Group by source, add related concepts]
 ```
 
-How "no hallucination" is enforced in code (`src/search/engine.py`):
+How "no hallucination" is enforced in code (`src/retrieval/engine.py`):
 
 1. No text is generated. An answer sentence is always `page_text[start:end]`.
 2. `validate_quote` checks every quote against the stored page before it is returned. A quote that fails is dropped.
@@ -289,14 +291,14 @@ erDiagram
 
 ## 10. Obsidian export
 
-`python -m src.pipeline export` writes `output/obsidian_vault/`:
+`python -m src.api.cli export` writes `output/obsidian_vault/`:
 
 - `Concepts/<name>.md`: frontmatter (`type`, `aliases`, `source_documents`, `mention_count`), the description quote with its citation, `[[wikilinks]]` to related concepts with relation type, confidence and a citation, and a Sources section with one citation per page.
 - `Documents/<title>.md`: frontmatter with title, author/editor, year, filename and pages, plus links to every concept found in the document.
 
 The vault is rebuilt on each export.
 
-## 11. Concept-first pipeline (optional, uses Claude)
+## 11. Concept-first pipeline (optional, local Qwen or Claude)
 
 ```mermaid
 flowchart TD
@@ -314,7 +316,7 @@ flowchart TD
     G --> K[(kg_concepts, kg_relationships)]
 ```
 
-- The run is started by hand (`python -m src.kg.orchestrator`); the web app does not call the LLM.
+- The run is started by hand (`python -m src.api.kg_cli`); the web app does not call the LLM.
 - Pass 1 results are stored on each chunk, so only new, changed or previously failed chunks are sent again.
 - Every concept mention and relationship keeps a quote whose page offsets point into the stored page text, so each graph element can be traced to its document and page.
 - Pass 2 never creates relationships; it only re-points Pass 1 relationships to merged concepts and combines duplicates.
@@ -323,3 +325,18 @@ flowchart TD
 ## 12. Projects
 
 Every step above runs inside one project. A document, its pages, images, mentions, concepts, relationships, index entries and concept-first graph all carry the same `project_id`; IDs derived from names or file hashes include the project (the default project keeps its original IDs). Merging, relationship building, image linking, indexing and the concept-first enrichment each read only one project's records and replace only that project's records, so two projects never share or connect a concept. The API loads one in-memory search and graph service per project and answers every request from the project named in `?project=`.
+
+## 13. One knowledge lifecycle (architecture)
+
+```
+ingest (no model) -> pages, images, metadata, version record
+   -> structure parser (sections, tables, figures, equations)            document_intelligence
+   -> candidates: GLiNER spans | LLM concepts/relationships | claims | figures (vision + OCR)   knowledge_extraction via model_runtime
+   -> local validation (quotes located, vocabulary, endpoints)           evidence_quality.validation
+   -> merge / enrich across documents of one project                     knowledge_extraction
+   -> governance: trace, source, endpoints, aliases, numbers, contradictions -> status   evidence_quality.governance
+   -> repository (statuses, validation records, adjudications)           knowledge_repository
+   -> retrieval (rejected items hidden), API, CLI                        retrieval, orchestration.services, api
+```
+
+Every stage is idempotent and recorded in `stage_runs`. Module boundaries, the dependency diagram and the remaining gaps are in `docs/ARCHITECTURE.md`.

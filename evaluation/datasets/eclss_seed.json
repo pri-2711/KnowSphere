@@ -1,0 +1,18 @@
+{
+  "name": "eclss-seed-1",
+  "notes": "DRAFT seed set, labelled by the assistant (not a domain expert) from page headings of eclss-technical-brief-ochmo.pdf on 2026-11-17. Needs human review before its numbers are used as acceptance evidence. Queries 10-12 are paraphrases that avoid the document's wording on purpose.",
+  "retrieval": [
+    {"query": "human body inputs and outputs", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 4}]},
+    {"query": "pressure control system and oxygen respiration", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 5}]},
+    {"query": "air revitalization system", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 7}]},
+    {"query": "temperature and humidity requirements", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 8}]},
+    {"query": "removal of CO2 and trace contaminants", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 9}]},
+    {"query": "potable water per crewmember per day", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 11}]},
+    {"query": "calcium deposits urine processing assembly", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 12}]},
+    {"query": "fire detection and suppression", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 13}]},
+    {"query": "multi-mission space exploration vehicle ECLSS design", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 14}]},
+    {"query": "how much drinking water does an astronaut need each day", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 11}]},
+    {"query": "what happens if something starts burning on the station", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 13}]},
+    {"query": "minerals clogging the urine distiller", "relevant": [{"document": "eclss-technical-brief-ochmo.pdf", "page": 12}]}
+  ]
+}
